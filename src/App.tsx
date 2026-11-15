@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from './api';
+import { api, getDevProviderChoice, setDevMode, setDevProviderChoice, type DevProviderChoice } from './api';
 import type { ListItem, Profile, ScreenName, UiLang } from './types';
 import { detectLang, t } from './i18n';
 import { ProfilePicker } from './screens/ProfilePicker';
@@ -11,6 +11,7 @@ import { Recommendations } from './screens/Recommendations';
 import { AdHoc } from './screens/AdHoc';
 import { ShowPicker } from './components/ShowPicker';
 import { ProfileSwitcher } from './components/ProfileSwitcher';
+import { DevBar } from './components/DevBar';
 
 const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navTaste' | 'navRecs' }[] = [
   { screen: 'home', labelKey: 'navHome' },
@@ -34,14 +35,39 @@ export function App() {
   const [detailItem, setDetailItem] = useState<ListItem | null>(null);
   const [addWatchedOpen, setAddWatchedOpen] = useState(false);
   const [homeKey, setHomeKey] = useState(0);
+  // Dev-deployment identity, from the Worker's runtime flag (same
+  // bundle serves production and dev — nothing here is build-time).
+  const [isDev, setIsDev] = useState(false);
+  const [serverProvider, setServerProvider] = useState('unknown');
+  const [devChoice, setDevChoice] = useState<DevProviderChoice | null>(() => getDevProviderChoice());
+
+  useEffect(() => {
+    // The health check decides dev identity; a failed check means
+    // "not dev" (never show dev UI on an unknown deployment).
+    api
+      .health()
+      .then((res) => {
+        setIsDev(Boolean(res.dev));
+        setServerProvider(res.llmProvider ?? 'unknown');
+        if (res.dev) setDevMode(true);
+      })
+      .catch(() => {
+        setIsDev(false);
+      });
+  }, []);
+
+  const handleDevChoice = (choice: DevProviderChoice) => {
+    setDevProviderChoice(choice);
+    setDevChoice(choice);
+  };
 
   // Bilingual by design (spec §8): default from the browser, switchable,
   // layout mirrors fully in RTL.
   useEffect(() => {
     document.documentElement.lang = lang;
     document.documentElement.dir = lang === 'he' ? 'rtl' : 'ltr';
-    document.title = t(lang, 'appName');
-  }, [lang]);
+    document.title = (isDev ? '[DEV] ' : '') + t(lang, 'appName');
+  }, [lang, isDev]);
 
   useEffect(() => {
     void loadProfiles();
@@ -121,6 +147,9 @@ export function App() {
 
   return (
     <div className="app">
+      {isDev ? (
+        <DevBar lang={lang} serverProvider={serverProvider} choice={devChoice} onChoice={handleDevChoice} />
+      ) : null}
       <header className="header">
         <div className="header-title">
           <h1>{t(lang, 'appName')}</h1>

@@ -634,3 +634,46 @@ html[dir="rtl"] .stepper-step { padding: 8px 8px 8px 16px; }
 }
 .footer img { display: block; }
 .footer .muted { margin: 0; }
+
+/* ------------------------------------------------- dev deployment only ---
+   Rendered only when the Worker reports dev=true (DevBar). Production
+   never mounts these elements, so these rules are inert there. */
+
+.dev-wrap { margin-bottom: 16px; }
+
+.dev-banner {
+  background: #f5c542;
+  color: #111;
+  font-weight: 900;
+  text-align: center;
+  padding: 8px 12px;
+  border-radius: 10px 10px 0 0;
+  letter-spacing: 0.02em;
+}
+
+.dev-bar {
+  display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+  background: #241d05;
+  border: 1px solid rgba(245, 197, 66, 0.45);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  padding: 10px 14px;
+}
+
+.dev-label { font-weight: 700; }
+.dev-switch { display: flex; gap: 8px; }
+.dev-meta { font-size: 0.85rem; }
+
+.dev-watermark {
+  position: fixed;
+  inset-inline-end: 14px;
+  bottom: 10px;
+  font-size: 64px;
+  font-weight: 900;
+  line-height: 1;
+  color: rgba(245, 197, 66, 0.14);
+  pointer-events: none;
+  user-select: none;
+  z-index: 50;
+  letter-spacing: 0.08em;
+}

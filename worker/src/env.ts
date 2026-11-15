@@ -19,4 +19,31 @@ export interface Env {
   /** TMDB API v4 read access token (Bearer). Worker secret; never committed. */
   TMDB_READ_TOKEN?: string;
   ENVIRONMENT?: string;
+  /**
+   * LLM provider selector. `'mock'` enables the deterministic mock
+   * provider (worker/src/mockLlm.ts) for quota-free development and
+   * verification. Anything else (including unset) means the real
+   * Workers AI provider. NEVER set this in production bindings —
+   * see deploy/README.md. The dev Worker sets it to 'mock'.
+   */
+  LLM_PROVIDER?: string;
+  /**
+   * Chat-model override for the real provider (a Workers AI model id).
+   * Unset = the production default (Llama 3.3 70B). The dev Worker
+   * sets this to the cheap 8B model so the dev view's "cheap model"
+   * switch has something cheap to switch to.
+   */
+  LLM_MODEL?: string;
+  /**
+   * Embedding-model override for the real provider. Unset = BGE-M3.
+   */
+  EMBEDDING_MODEL?: string;
+  /**
+   * `'true'` ONLY on the dev Worker (show-recommender-dev). Gates the
+   * per-request dev provider override: the backend honors the
+   * X-Dev-Llm-Provider header only when this is 'true', so the
+   * override can never affect production. Also drives the DEV banner
+   * in the UI (via /api/health). Never set in production bindings.
+   */
+  IS_DEV_WORKER?: string;
 }

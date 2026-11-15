@@ -453,5 +453,166 @@ const rankDup = util.parseRankResponse(
 assert.deepEqual(rankDup.ranked.map((r) => r.tmdbId), [1]);
 assert.equal(rankDup.ranked[0].rationale, 'a');
 
+// ---------------------------------------------------------------- mock LLM provider + selection
+// Bundles llm.ts (which pulls in mockLlm.ts + util.ts) and embeddings.ts.
+
+async function bundleModule(name, entry) {
+  const file = join(root, 'node_modules', `.selftest-${name}.mjs`);
+  await build({
+    entryPoints: [join(root, 'worker', 'src', entry)],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    outfile: file,
+    logLevel: 'silent',
+  });
+  const mod = await import(file);
+  await unlink(file).catch(() => {});
+  return mod;
+}
+
+const llm = await bundleModule('llm', 'llm.ts');
+const mockLlm = await bundleModule('mock', 'mockLlm.ts');
+const embeddings = await bundleModule('embed', 'embeddings.ts');
+
+const fakeAi = { run: async () => { throw new Error('real AI must not be called in selftest'); } };
+
+// --- mock determinism + shapes (all four call sites) ---
+
+const consolNotes = [
+  { kind: 'liked', source: 'rating', text: 'Fauda', createdAt: 1 },
+  { kind: 'disliked', source: 'rating', text: 'The Office: too cringe', createdAt: 2 },
+  { kind: 'note', source: 'note', text: 'Something light for casual evenings', createdAt: 3 },
+  { kind: 'note', source: 'note', text: 'I want deep immersive stories that demand concentration', createdAt: 4 },
+  { kind: 'note', source: 'note', text: 'No horror', createdAt: 5 },
+];
+const consolReq = llm.buildConsolidationPrompt(consolNotes, 'en', null, ['he', 'en']);
+const mockProvider = new mockLlm.MockLlmProvider();
+assert.equal(mockProvider.name, 'mock');
+const consolOut1 = await mockProvider.generate(consolReq);
+const consolOut2 = await mockProvider.generate(consolReq);
+assert.equal(consolOut1, consolOut2); // deterministic
+const consolParsed = util.parseConsolidationResponse(consolOut1);
+assert.ok(consolParsed.sections.shared.includes('Fauda')); // ratings -> Shared
+assert.ok(consolParsed.sections.shared.includes('The Office'));
+assert.ok(consolParsed.sections.shared.includes('No horror')); // ambiguous -> Shared
+assert.ok(consolParsed.sections.casual.includes('light')); // casual cue routes
+assert.ok(consolParsed.sections.deep.includes('immersive')); // deep cue routes
+assert.deepEqual(consolParsed.contradictions, []);
+assert.equal(consolParsed.languageConflict, null);
+
+const rankCands = [
+  { tmdbId: 11, title: 'Alpha Show', year: '2020', genres: ['Comedy'], originalLanguage: 'en', originCountry: ['US'], anchorTitle: 'Seinfeld' },
+  { tmdbId: 22, title: 'Beta Drama', year: '2021', genres: ['Drama'], originalLanguage: 'en', originCountry: ['US'] },
+  { tmdbId: 33, title: 'Gamma Toon', year: '2019', genres: ['Animation', 'Comedy'], originalLanguage: 'en', originCountry: ['US'], anchorTitle: 'The Simpsons' },
+];
+const rankReq = llm.buildRankPrompt('Love comedies, no horror.', 'casual', rankCands, 'en');
+const rankOut1 = await mockProvider.generate(rankReq);
+const rankOut2 = await mockProvider.generate(rankReq);
+assert.equal(rankOut1, rankOut2);
+const rankParsed = util.parseRankResponse(rankOut1, new Set([11, 22, 33]));
+assert.ok(rankParsed);
+assert.equal(rankParsed.ranked.length, 3);
+assert.deepEqual(new Set(rankParsed.ranked.map((r) => r.tmdbId)), new Set([11, 22, 33]));
+// Order is input-order independent: reversed candidates -> same order (dual-pass merge converges).
+const rankReqRev = llm.buildRankPrompt('Love comedies, no horror.', 'casual', [...rankCands].reverse(), 'en');
+const rankParsedRev = util.parseRankResponse(await mockProvider.generate(rankReqRev), new Set([11, 22, 33]));
+assert.deepEqual(rankParsedRev.ranked.map((r) => r.tmdbId), rankParsed.ranked.map((r) => r.tmdbId));
+// Rationales cite the anchor (grounding keeps them) or genre+year.
+const alpha = rankParsed.ranked.find((r) => r.tmdbId === 11);
+assert.ok(alpha.rationale.includes('Seinfeld'));
+const beta = rankParsed.ranked.find((r) => r.tmdbId === 22);
+assert.ok(beta.rationale.includes('Drama') && beta.rationale.includes('2021'));
+
+const removalReq = llm.buildRemovalCheckPrompt(
+  [{ title: 'Bad Show', year: '2020', genres: ['Horror'] }],
+  rankCands,
+  'en',
+);
+const removalOut = await mockProvider.generate(removalReq);
+assert.deepEqual(util.parseRemovalCheckResponse(removalOut, new Set([11, 22, 33])), []);
+
+const adhocReq = llm.buildAdhocRationalePrompt('something funny', rankCands[0], 'en');
+const adhocOut = await mockProvider.generate(adhocReq);
+assert.ok(adhocOut.includes('Alpha Show') && adhocOut.includes('2020'));
+assert.equal(adhocOut, await mockProvider.generate(adhocReq));
+
+// --- mock embeddings: deterministic, normalized, hash-derived ---
+assert.equal(mockLlm.MOCK_EMBEDDING_DIM, 64);
+const vecA1 = mockLlm.mockEmbedTexts(['hello world', 'other text']);
+const vecA2 = mockLlm.mockEmbedTexts(['hello world', 'other text']);
+assert.deepEqual(vecA1, vecA2);
+assert.equal(vecA1[0].length, 64);
+const norm = Math.sqrt(vecA1[0].reduce((s, v) => s + v * v, 0));
+assert.ok(Math.abs(norm - 1) < 1e-9);
+assert.ok(Math.abs(util.cosine(vecA1[0], vecA1[0]) - 1) < 1e-9);
+assert.ok(Math.abs(util.cosine(vecA1[0], vecA1[1])) < 0.9);
+assert.deepEqual(mockLlm.mockEmbedTexts(['']), [new Array(64).fill(0)]);
+
+// --- provider selection: default is real; mock needs the flag; override needs dev ---
+
+assert.equal(llm.DEFAULT_CHAT_MODEL, '@cf/meta/llama-3.3-70b-instruct-fp8-fast');
+assert.equal(llm.CHEAP_CHAT_MODEL, '@cf/meta/llama-3.1-8b-instruct-fp8');
+assert.equal(embeddings.DEFAULT_EMBED_MODEL, '@cf/baai/bge-m3');
+assert.equal(embeddings.resolveEmbedModel({}), '@cf/baai/bge-m3');
+assert.equal(embeddings.resolveEmbedModel({ EMBEDDING_MODEL: 'custom-embed' }), 'custom-embed');
+
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi }), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+assert.equal(llm.getLlmProvider({ AI: fakeAi }).name, 'workers-ai:llama-3.3-70b');
+assert.deepEqual(
+  llm.resolveLlmMode({ AI: fakeAi, LLM_MODEL: 'custom-model' }),
+  { kind: 'real', model: 'custom-model' },
+);
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, LLM_PROVIDER: 'mock' }), { kind: 'mock' });
+assert.equal(llm.getLlmProvider({ AI: fakeAi, LLM_PROVIDER: 'mock' }).name, 'mock');
+assert.deepEqual(llm.resolveLlmMode({}), { kind: 'stub' });
+assert.equal(llm.getLlmProvider({}).name, 'stub');
+// Mock works without an AI binding (local runs); stub still blocks.
+assert.deepEqual(llm.resolveLlmMode({ LLM_PROVIDER: 'mock' }), { kind: 'mock' });
+
+// Defense in depth: the override header is IGNORED without IS_DEV_WORKER=true.
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi }, 'mock'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+assert.deepEqual(llm.resolveLlmMode({}, 'mock'), { kind: 'stub' });
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'false' }, 'mock'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: '1' }, 'mock'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+// On the dev Worker the override is honored.
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, 'mock'), { kind: 'mock' });
+assert.deepEqual(
+  llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, 'cheap'),
+  { kind: 'real', model: llm.CHEAP_CHAT_MODEL },
+);
+assert.deepEqual(
+  llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true', LLM_MODEL: 'custom-cheap' }, 'cheap'),
+  { kind: 'real', model: 'custom-cheap' },
+);
+// Cheap without an AI binding degrades to stub, never to a crash.
+assert.deepEqual(llm.resolveLlmMode({ IS_DEV_WORKER: 'true' }, 'cheap'), { kind: 'stub' });
+// Invalid override values are ignored (env default wins).
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, 'bogus'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, null), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+assert.equal(llm.isDevWorker({ IS_DEV_WORKER: 'true' }), true);
+assert.equal(llm.isDevWorker({}), false);
+assert.equal(llm.parseDevOverride('mock'), 'mock');
+assert.equal(llm.parseDevOverride('cheap'), 'cheap');
+assert.equal(llm.parseDevOverride('MOCK'), null);
+assert.equal(llm.parseDevOverride(undefined), null);
+
+// --- embedTextsWithEnv: mock returns vectors without touching AI; real path uses the model override ---
+const mockVecs = await embeddings.embedTextsWithEnv({ LLM_PROVIDER: 'mock', AI: fakeAi }, ['a', 'b']);
+assert.equal(mockVecs.length, 2);
+assert.equal(mockVecs[0].length, 64);
+assert.equal(await embeddings.embedTextsWithEnv({}, ['a']), null);
+assert.deepEqual(await embeddings.embedTextsWithEnv({ AI: fakeAi }, []), []);
+const embedCalls = [];
+const recordingAi = {
+  run: async (model, input) => {
+    embedCalls.push(model);
+    return { data: input.text.map(() => [0.5, 0.5]) };
+  },
+};
+const realVecs = await embeddings.embedTextsWithEnv({ AI: recordingAi, EMBEDDING_MODEL: 'emb-x' }, ['a']);
+assert.deepEqual(realVecs, [[0.5, 0.5]]);
+assert.deepEqual(embedCalls, ['emb-x']);
+
 await writeFile(join(root, 'node_modules', '.selftest-ok'), 'ok');
 console.log('selftest: all assertions passed');

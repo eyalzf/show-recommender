@@ -118,6 +118,12 @@ const STRINGS = {
     tasteSaved: 'Preferences saved.',
     bootstrapSaving: 'Saving…',
     languagesSaved: 'Languages saved.',
+    devBanner: 'DEV environment — test data only, separate database. Nothing here affects the real app.',
+    devProviderLabel: 'AI provider for this session',
+    devMock: 'Mock (no AI calls)',
+    devCheap: 'Cheap model (8B)',
+    devDefault: 'Server default',
+    devProviderNote: 'Applies to the next consolidation or list refresh in this tab.',
   },
   he: {
     appName: 'סדרות מומלצות',
@@ -232,6 +238,12 @@ const STRINGS = {
     tasteSaved: 'ההעדפות נשמרו.',
     bootstrapSaving: 'שומר…',
     languagesSaved: 'השפות נשמרו.',
+    devBanner: 'סביבת DEV — נתוני בדיקה בלבד, בסיס נתונים נפרד. שום דבר כאן לא משפיע על האפליקציה האמיתית.',
+    devProviderLabel: 'ספק ה־AI לסשן הזה',
+    devMock: 'מדומה (בלי קריאות AI)',
+    devCheap: 'מודל זול (8B)',
+    devDefault: 'ברירת המחדל של השרת',
+    devProviderNote: 'חל על האיחוד או רענון הרשימות הבא בטאב הזה.',
   },
 } as const;
 

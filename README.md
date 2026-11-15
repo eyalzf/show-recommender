@@ -175,20 +175,34 @@ Application" is ambiguous. Do not weaken these guardrails quietly.
 npm install
 npm run dev        # frontend only, Vite dev server
 npm run build      # vite build + Worker bundle -> worker/bundle.js
-npm run test       # pure-helper self-test (worker/src/util.ts)
+npm run test       # pure-helper self-test + mock/provider-selection tests
+npm run local:mock # full Worker end-to-end in Node with the mock LLM (zero neurons)
 npm run typecheck
 ```
+
+Verification is mock-first and quota-frugal — read
+[`docs/dev-verification.md`](docs/dev-verification.md) before running
+anything against a real model. The dev deployment
+(https://show-recommender-dev.eyalzf.workers.dev) runs the same bundle
+with the mock provider by default, a separate database, and a DEV
+banner + provider switch in the UI; production keeps the 70B model
+only. See `deploy/README.md` for the bindings split and the rule that
+production bindings must never carry dev flags.
 
 ## Deploy
 
 Deployments go through the Cloudflare Workers upload API (the available
 API token cannot be handed to wrangler), uploading `worker/bundle.js`
-with the R2 + Workers AI bindings (D1 once it exists) and enabling the
-`workers.dev` route. See `wrangler.toml` for the binding contract.
+with the bindings in `deploy/bindings.json` (production) or
+`deploy/bindings-dev.json` (dev) and enabling the `workers.dev` route.
+See `wrangler.toml` for the binding contract and `deploy/README.md`
+for the exact commands.
 
 Secrets (dashboard or API only, never committed):
 
-- `TMDB_READ_TOKEN` — TMDB API v4 read access token (Bearer).
+- `TMDB_READ_TOKEN` — TMDB API v4 read access token (Bearer). Needed
+  on BOTH Workers (same value); the dev Worker's copy is a one-time
+  manual dashboard step.
 
 ## Layout
 
@@ -200,8 +214,11 @@ worker/migrations/   D1 schema (0001) + override seed contract (0002)
                      + engine migration: show_title, excluded flag,
                      verified override seeds (0003)
 scripts/             bundle-worker.mjs — embeds dist/ + esbuild bundle;
-                     selftest.mjs — pure-helper assertions
-deploy/              bindings.json — Worker bindings for the upload API
+                     selftest.mjs — pure-helper + mock/provider assertions;
+                     local-mock-run.mjs — full local Worker run, mock LLM
+docs/                dev-verification.md — quota-frugal verification playbook
+deploy/              bindings.json — production Worker bindings;
+                     bindings-dev.json — dev Worker bindings (mock + dev flags)
 ```
 
 ## Build rules that must keep holding (spec §9)
@@ -216,3 +233,8 @@ deploy/              bindings.json — Worker bindings for the upload API
    retrieval and the removal-only final check (both are exclusion
    layers, not preference learning).
 6. Rating a show anywhere removes it from both Top 10 lists.
+7. The default LLM provider is always the real one. The mock engages
+   only via the explicit LLM_PROVIDER=mock flag or the dev-only
+   override, which the backend honors only when IS_DEV_WORKER=true —
+   production bindings must never carry either flag (see
+   deploy/README.md).

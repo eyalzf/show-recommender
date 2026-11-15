@@ -1,11 +1,47 @@
 import { ApiError } from './types';
 import type { ListItem, Profile, SearchHit, ShowDetail, ShowFeedbackEntry, TasteContradiction, TasteSections, UiLang } from './types';
 
+/**
+ * Dev-deployment support (same bundle serves production and dev; the
+ * Worker reports the dev flag via /api/health). The dev provider
+ * override header is sent ONLY when dev mode was enabled by a positive
+ * health check AND the user picked a provider in the dev bar — and the
+ * backend honors it only on the dev Worker, so it can never affect
+ * production (defense in depth, both sides).
+ */
+export type DevProviderChoice = 'mock' | 'cheap';
+
+const DEV_PROVIDER_KEY = 'dev-llm-provider';
+let devModeEnabled = false;
+
+export function setDevMode(enabled: boolean): void {
+  devModeEnabled = enabled;
+}
+
+export function getDevProviderChoice(): DevProviderChoice | null {
+  try {
+    const v = sessionStorage.getItem(DEV_PROVIDER_KEY);
+    return v === 'mock' || v === 'cheap' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setDevProviderChoice(choice: DevProviderChoice): void {
+  try {
+    sessionStorage.setItem(DEV_PROVIDER_KEY, choice);
+  } catch {
+    // Private mode: the choice simply does not persist.
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
-  });
+  const headers: Record<string, string> = { 'content-type': 'application/json', ...(init?.headers as Record<string, string> ?? {}) };
+  if (devModeEnabled) {
+    const choice = getDevProviderChoice();
+    if (choice) headers['x-dev-llm-provider'] = choice;
+  }
+  const res = await fetch(path, { ...init, headers });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
     throw new ApiError(
@@ -40,7 +76,8 @@ export interface ListsResponse {
 }
 
 export const api = {
-  health: () => req<{ ok: boolean; dbBound: boolean; aiBound: boolean; tmdbConfigured: boolean }>('/api/health'),
+  health: () =>
+    req<{ ok: boolean; dbBound: boolean; aiBound: boolean; tmdbConfigured: boolean; dev: boolean; llmProvider: string }>('/api/health'),
 
   search: (q: string, lang: UiLang) =>
     req<{ results: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}&lang=${lang}`),

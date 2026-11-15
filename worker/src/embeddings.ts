@@ -1,4 +1,6 @@
 import type { Env } from './env';
+import { resolveLlmMode } from './llm';
+import { mockEmbedTexts } from './mockLlm';
 
 /**
  * Text embeddings via Workers AI (BGE-M3 — multilingual, handles Hebrew
@@ -15,15 +17,21 @@ import type { Env } from './env';
  * error, or unexpected response shape).
  */
 
-const EMBED_MODEL = '@cf/baai/bge-m3';
+/** Production embedding model. Never change the default without a product decision. */
+export const DEFAULT_EMBED_MODEL = '@cf/baai/bge-m3';
+
+export function resolveEmbedModel(env: Env): string {
+  return env.EMBEDDING_MODEL ?? DEFAULT_EMBED_MODEL;
+}
 
 export async function embedTexts(
   ai: NonNullable<Env['AI']>,
   texts: string[],
+  model: string = DEFAULT_EMBED_MODEL,
 ): Promise<number[][] | null> {
   if (texts.length === 0) return [];
   try {
-    const out = (await ai.run(EMBED_MODEL, { text: texts })) as unknown;
+    const out = (await ai.run(model, { text: texts })) as unknown;
     if (out && typeof out === 'object' && 'data' in out) {
       const data = (out as { data?: unknown }).data;
       if (Array.isArray(data) && data.every((row) => Array.isArray(row))) {
@@ -47,6 +55,26 @@ export async function embedTexts(
     console.error('embeddings call failed', err);
     return null;
   }
+}
+
+/**
+ * Env-aware embedding entry — the call sites' one path. In mock mode
+ * (LLM_PROVIDER=mock or the dev-only override) returns deterministic
+ * mock vectors with ZERO Workers AI calls; otherwise the real model
+ * (EMBEDDING_MODEL override, else BGE-M3); null when no AI binding.
+ * Embeddings stay BGE-M3 in cheap mode — only the chat model gets
+ * cheaper, per the dev-view decision.
+ */
+export async function embedTextsWithEnv(
+  env: Env,
+  texts: string[],
+  devOverrideHeader?: string | null,
+): Promise<number[][] | null> {
+  if (texts.length === 0) return [];
+  const mode = resolveLlmMode(env, devOverrideHeader);
+  if (mode.kind === 'mock') return mockEmbedTexts(texts);
+  if (mode.kind !== 'real' || !env.AI) return null;
+  return embedTexts(env.AI, texts, resolveEmbedModel(env));
 }
 
 /**

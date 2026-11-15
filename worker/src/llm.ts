@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import { MockLlmProvider } from './mockLlm';
 import { formatSectionsForPrompt, type TasteSections } from './util';
 
 /**
@@ -20,6 +21,13 @@ import { formatSectionsForPrompt, type TasteSections } from './util';
  * never see what the show is about. Keep it that way: if a future
  * feature needs the LLM to see show descriptions, that needs a product /
  * terms decision first, not a quiet prompt change.
+ *
+ * PROVIDER SELECTION (resolveLlmMode — the ONE place): the default is
+ * always the real Workers AI provider. The deterministic mock
+ * (mockLlm.ts) engages only via the explicit LLM_PROVIDER=mock env flag
+ * or the dev-only per-request override, and the override is honored
+ * ONLY on the dev Worker (IS_DEV_WORKER=true), so it can never affect
+ * production. See docs/dev-verification.md.
  */
 
 export interface LlmRequest {
@@ -34,15 +42,84 @@ export interface LlmProvider {
   generate(req: LlmRequest): Promise<string>;
 }
 
-const LLAMA_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+/** Production chat model. Never change the default without a product decision. */
+export const DEFAULT_CHAT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
-/** Workers AI provider (Llama 3.3 70B). Used when the AI binding exists. */
+/**
+ * Cheap chat model for the dev view's "cheap model" switch. Env
+ * LLM_MODEL overrides this when set. NOTE: Cloudflare lists this id
+ * with a planned deprecation (20 Nov 2026, per the Workers AI model
+ * catalog) — if the cheap switch stops working, pick the current cheap
+ * id from the catalog and set LLM_MODEL on the dev Worker; no code
+ * change is needed. The id is verified by the single post-reset smoke
+ * call, not by assumption (see docs/dev-verification.md).
+ */
+export const CHEAP_CHAT_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
+
+/** Request header carrying the dev-only provider override ('mock' | 'cheap'). Honored only on the dev Worker. */
+export const DEV_OVERRIDE_HEADER = 'x-dev-llm-provider';
+
+export type DevOverride = 'mock' | 'cheap';
+
+/** True only on the dev Worker. The override gate depends on this exact value. */
+export function isDevWorker(env: Env): boolean {
+  return env.IS_DEV_WORKER === 'true';
+}
+
+/** Parse the override header. Anything other than the two exact values is ignored. */
+export function parseDevOverride(headerValue: string | null | undefined): DevOverride | null {
+  if (headerValue === 'mock' || headerValue === 'cheap') return headerValue;
+  return null;
+}
+
+export type LlmMode =
+  | { kind: 'mock' }
+  | { kind: 'real'; model: string }
+  | { kind: 'stub' };
+
+/**
+ * THE provider decision — every call site goes through here (via
+ * getLlmProvider / embedTextsWithEnv). Precedence:
+ *   1. Dev-only per-request override, honored ONLY when IS_DEV_WORKER
+ *      is 'true'. 'mock' forces the mock; 'cheap' forces the real
+ *      provider with the cheap model (LLM_MODEL env wins when set).
+ *   2. LLM_PROVIDER=mock env flag (dev Worker bindings, local runs).
+ *   3. Real provider with LLM_MODEL override, else the 70B default.
+ *   4. No AI binding: the stub (which callers must never persist).
+ *
+ * On a non-dev Worker the override header is silently ignored — the
+ * header alone can never switch production to the mock or the cheap
+ * model. Unit-tested in scripts/selftest.mjs.
+ */
+export function resolveLlmMode(env: Env, devOverrideHeader?: string | null): LlmMode {
+  if (isDevWorker(env)) {
+    const override = parseDevOverride(devOverrideHeader);
+    if (override === 'mock') return { kind: 'mock' };
+    if (override === 'cheap') {
+      if (!env.AI) return { kind: 'stub' };
+      return { kind: 'real', model: env.LLM_MODEL ?? CHEAP_CHAT_MODEL };
+    }
+  }
+  if (env.LLM_PROVIDER === 'mock') return { kind: 'mock' };
+  if (env.AI) return { kind: 'real', model: env.LLM_MODEL ?? DEFAULT_CHAT_MODEL };
+  return { kind: 'stub' };
+}
+
+/** Workers AI provider. Used when the AI binding exists. */
 export class WorkersAiLlamaProvider implements LlmProvider {
-  readonly name = 'workers-ai:llama-3.3-70b';
-  constructor(private readonly ai: NonNullable<Env['AI']>) {}
+  readonly name: string;
+  constructor(
+    private readonly ai: NonNullable<Env['AI']>,
+    private readonly model: string = DEFAULT_CHAT_MODEL,
+  ) {
+    // The default keeps the long-standing provider name; an override
+    // names the model actually in use so health/provider reporting
+    // stays honest.
+    this.name = model === DEFAULT_CHAT_MODEL ? 'workers-ai:llama-3.3-70b' : `workers-ai:${model}`;
+  }
 
   async generate(req: LlmRequest): Promise<string> {
-    const out = (await this.ai.run(LLAMA_MODEL, {
+    const out = (await this.ai.run(this.model, {
       messages: [
         { role: 'system', content: req.system },
         { role: 'user', content: req.user },
@@ -83,8 +160,10 @@ export class StubLlmProvider implements LlmProvider {
 //   ... POST https://api.meta.ai/v1/chat/completions, OpenAI-compatible ...
 // }
 
-export function getLlmProvider(env: Env): LlmProvider {
-  if (env.AI) return new WorkersAiLlamaProvider(env.AI);
+export function getLlmProvider(env: Env, devOverrideHeader?: string | null): LlmProvider {
+  const mode = resolveLlmMode(env, devOverrideHeader);
+  if (mode.kind === 'mock') return new MockLlmProvider();
+  if (mode.kind === 'real') return new WorkersAiLlamaProvider(env.AI!, mode.model);
   return new StubLlmProvider();
 }
 
