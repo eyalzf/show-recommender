@@ -129,6 +129,11 @@ function toDetail(f) {
 
 const byId = new Map(FIXTURES.map((f) => [f.id, f]));
 
+// Every /3/discover/tv call the Worker makes, for the per-language
+// discovery assertions (single-language calls, per-language pages and
+// vote thresholds, no combined-language call).
+const discoverCalls = [];
+
 globalThis.fetch = async (url) => {
   const u = new URL(String(url));
   const path = u.pathname;
@@ -138,7 +143,33 @@ globalThis.fetch = async (url) => {
   }
   if (path === '/3/discover/tv') {
     const page = Number(u.searchParams.get('page') ?? '1');
-    const slice = FIXTURES.slice((page - 1) * 12, page * 12);
+    const langParam = u.searchParams.get('with_original_language');
+    const genreParam = u.searchParams.get('with_genres');
+    const minVotes = Number(u.searchParams.get('vote_count.gte') ?? '0');
+    discoverCalls.push({
+      languages: langParam,
+      page,
+      minVoteCount: u.searchParams.get('vote_count.gte'),
+      genres: genreParam,
+    });
+    // TMDB semantics: with_original_language ORs on '|'; with_genres
+    // ANDs on ',' and ORs on '|'; vote_count.gte filters; 20 per page.
+    let results = FIXTURES;
+    if (langParam) {
+      const langs = langParam.split('|');
+      results = results.filter((f) => langs.includes(f.original_language));
+    }
+    if (genreParam) {
+      if (genreParam.includes('|')) {
+        const ids = genreParam.split('|').map(Number);
+        results = results.filter((f) => ids.some((id) => f.genre_ids.includes(id)));
+      } else {
+        const ids = genreParam.split(',').map(Number);
+        results = results.filter((f) => ids.every((id) => f.genre_ids.includes(id)));
+      }
+    }
+    if (minVotes > 0) results = results.filter((f) => f.vote_count >= minVotes);
+    const slice = results.slice((page - 1) * 20, page * 20);
     return json({ results: slice });
   }
   if (path === '/3/trending/tv/week') return json({ results: FIXTURES.slice(0, 8) });
@@ -313,6 +344,35 @@ console.log('bootstrap data written (5 ratings + 2 notes)');
     assert.ok(item.seasons >= 1 && item.episodes >= 1, 'enrichment ran');
   }
   console.log(`lists generated: casual ${body.casual.length}, deep ${body.deep.length}`);
+  // Pool inclusion end to end: with per-language discovery + the pool
+  // floor, Hebrew fixtures reach both lists (deterministic: fixed
+  // fixtures + hash-ordered mock ranking).
+  assert.ok(body.casual.some((i) => i.language === 'Hebrew'), 'casual list includes a Hebrew show');
+  assert.ok(body.deep.some((i) => i.language === 'Hebrew'), 'deep list includes a Hebrew show');
+  console.log('Hebrew shows in lists:', [
+    ...body.casual.filter((i) => i.language === 'Hebrew').map((i) => i.title),
+    ...body.deep.filter((i) => i.language === 'Hebrew').map((i) => i.title),
+  ].join(', '));
+  // 4b. Per-language discovery: generation issued single-language
+  // discover calls (never a combined he|en call), 2 pages per
+  // language for this 2-language profile, with the per-language vote
+  // thresholds (he 3, en 10), plus one genre-discover call per
+  // language. (The ad-hoc step below still uses the old combined call
+  // — that path is intentionally unchanged — so assert before it.)
+  const primaryCalls = discoverCalls.filter((d) => !d.genres);
+  const genreCalls = discoverCalls.filter((d) => d.genres);
+  for (const d of discoverCalls) {
+    assert.ok(!d.languages || !d.languages.includes('|'), 'no combined-language discover call');
+  }
+  assert.deepEqual(
+    primaryCalls.map((d) => `${d.languages}:p${d.page}:vc${d.minVoteCount}`).sort(),
+    ['en:p1:vc10', 'en:p2:vc10', 'he:p1:vc3', 'he:p2:vc3'],
+    'primary discover: 2 single-language pages per language, per-language thresholds',
+  );
+  assert.equal(genreCalls.length, 2, 'one genre-discover call per language');
+  assert.deepEqual(genreCalls.map((d) => d.languages).sort(), ['en', 'he']);
+  assert.deepEqual(genreCalls.map((d) => d.minVoteCount).sort(), ['10', '3']);
+  console.log('per-language discovery verified:', JSON.stringify(discoverCalls));
 }
 
 // 5. Ad-hoc pick via mock rationale.

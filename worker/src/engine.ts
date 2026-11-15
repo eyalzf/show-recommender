@@ -45,10 +45,14 @@ import {
   clusterFor,
   combineTasteSections,
   cosine,
+  ensureLanguageMinimums,
+  genreDiscoverPlans,
+  languagePoolMinimum,
   normalizeTitle,
   paceFor,
   parseRankResponse,
   parseRemovalCheckResponse,
+  primaryDiscoverPlans,
   selectCapped,
   structureFor,
   tasteTextForKind,
@@ -63,9 +67,14 @@ import {
  * Retrieval narrows the catalog to a few dozen candidates:
  *   1. hard filters first — profile languages, rated/dropped/deny-listed
  *      shows excluded, override-excluded duplicates excluded;
- *   2. candidate sources — TMDB discover (language-filtered, popular),
- *      trending, TMDB recommendations anchored on liked shows, genre
- *      discover from liked shows' genres, and resolved external recs;
+ *   2. candidate sources — TMDB discover ONCE PER PROFILE LANGUAGE
+ *      (popularity within that language; a combined-language discover
+ *      buried non-English shows entirely — see util.ts), trending,
+ *      TMDB recommendations anchored on liked shows, per-language
+ *      genre discover from liked shows' genres, and resolved external
+ *      recs; each language keeps a minimum share of the rank pool
+ *      (see languagePoolMinimum), so score-order trimming cannot drop
+ *      a whole language before ranking;
  *   3. retrieval scoring — embedding similarity of the taste summary
  *      against title+genre text (NEVER overviews), popularity, votes,
  *      similar-show and external-rec boosts, genre overlap with likes.
@@ -116,11 +125,15 @@ import {
  * drove retrieval plus real genres/year; ungrounded LLM text falls back
  * to a template built from real data (see rerank.groundRationale).
  *
- * Subrequest budget: at most ~44 TMDB calls per generation on a cold
- * metadata cache (free-plan Workers allow 50 per invocation) — the
- * liked/negative detail fetches for calibration, anchors, and negative
- * layers are capped (see MAX_LIKED_META / MAX_NEGATIVE_META) and go
- * through the 180-day cache, so repeat generations cost less.
+ * Subrequest budget: at most ~47 TMDB calls per generation on a cold
+ * metadata cache for a two-language profile (free-plan Workers allow
+ * 50 per invocation) — per-language discover adds 3 calls over the old
+ * combined calls (4 primary + 2 genre instead of 2 + 1); profiles
+ * with more languages fetch one primary page per language, bounding
+ * discover at 12 calls for six languages. The liked/negative detail
+ * fetches for calibration, anchors, and negative layers are capped
+ * (see MAX_LIKED_META / MAX_NEGATIVE_META) and go through the 180-day
+ * cache, so repeat generations cost less.
  */
 
 export interface ListItemOut {
@@ -328,10 +341,15 @@ async function retrieveCandidates(
     }
   };
 
-  // Primary pools (parallel).
+  // Primary pools (parallel). Discover runs ONCE PER PROFILE
+  // LANGUAGE (popularity within that language): a combined he|en
+  // discover sorted by global popularity returned zero Hebrew shows
+  // in 40 results, starving the pool before ranking ever ran (see
+  // primaryDiscoverPlans in util.ts). Trending stays global.
   await Promise.all([
-    absorb(() => discoverShows(c, uiLang, { languages, page: 1, minVoteCount: 10 }), () => {}),
-    absorb(() => discoverShows(c, uiLang, { languages, page: 2, minVoteCount: 10 }), () => {}),
+    ...primaryDiscoverPlans(languages).map((plan) =>
+      absorb(() => discoverShows(c, uiLang, plan), () => {}),
+    ),
     absorb(() => getTrending(c, uiLang), () => {}),
   ]);
 
@@ -361,14 +379,11 @@ async function retrieveCandidates(
         if (!cand.anchorIds.includes(id)) cand.anchorIds.push(id);
       }),
     ),
-    ...(topGenreIds.length > 0
-      ? [
-          absorb(
-            () => discoverShows(c, uiLang, { languages, genreIds: topGenreIds, page: 1, minVoteCount: 10 }),
-            () => {},
-          ),
-        ]
-      : []),
+    // Genre discover, per language like the primary calls: the old
+    // combined call buried non-English shows the same way.
+    ...genreDiscoverPlans(languages, topGenreIds).map((plan) =>
+      absorb(() => discoverShows(c, uiLang, plan), () => {}),
+    ),
   ]);
 
   // External recommendations: resolve titles to TMDB ids (strict title
@@ -915,6 +930,11 @@ export async function generateLists(
   // re-rank must accept them or they never surface), then the pool
   // diversity cap so one cluster cannot crowd out the rest before
   // ranking. The cap relaxes on narrow pools (see selectCapped).
+  // Finally the per-language floor: each profile language keeps a
+  // minimum share of the pool (see languagePoolMinimum), so
+  // per-language discovery is not undone by score-order trimming
+  // before ranking. Pool-only — ranking and the Top 10 caps are
+  // untouched, and a single-language profile sees no change.
   const buildRankPool = (primary: Candidate[], other: Candidate[]) => {
     const ordered = [...primary];
     const strictIds = new Set<number>();
@@ -928,7 +948,14 @@ export async function generateLists(
       }
     }
     const picked = selectCapped(ordered, (cand) => clusterFor(cand.genreIds), POOL_CLUSTER_CAP, RANK_POOL_SIZE);
-    return { picked, strictIds };
+    const guaranteed = ensureLanguageMinimums(
+      ordered,
+      picked,
+      (cand) => cand.originalLanguage,
+      ctx.profile.languages,
+      languagePoolMinimum(RANK_POOL_SIZE, ctx.profile.languages.length),
+    );
+    return { picked: guaranteed, strictIds };
   };
   const casualBucket = buildRankPool(casualPrimary, deepPrimary);
   const deepBucket = buildRankPool(deepPrimary, casualPrimary);

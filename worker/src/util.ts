@@ -312,6 +312,181 @@ export function selectCapped<T>(
   return out;
 }
 
+// ---------------------------------------------------------------- per-language discovery
+//
+// The Hebrew gap (2026-11-15): no Israeli show ever reached the
+// recommendations. Two causes, both in retrieval. First, the primary
+// discover calls asked for the profile's languages COMBINED
+// (with_original_language=he|en) sorted by global popularity — the top
+// 40 results contained ZERO Hebrew shows (verified live against TMDB),
+// because no Hebrew show outranks US shows on worldwide popularity.
+// Second, every rated show was US/UK, so liked-show anchors pulled US
+// similars. Hebrew shows never entered the pool, so they were never
+// ranked, never rated, and never anchored: chicken and egg.
+//
+// The fix is pool-side, never ranking-side: discover runs ONCE PER
+// PROFILE LANGUAGE (popularity within that language), each language
+// keeps a guaranteed minimum share of the rank pool, and ranking stays
+// one unified pass on merit — no per-language ranking, no final-list
+// language quotas.
+
+/** One TMDB discover call: a single language, one page, one threshold. */
+export interface DiscoverPlan {
+  /** Single-element for per-language calls; empty = no restriction. */
+  languages: string[];
+  page: number;
+  minVoteCount: number;
+  genreIds?: number[];
+}
+
+/**
+ * Vote-count bar per discover language (TMDB counts, 2026-11-15).
+ * English keeps 10: its catalog is deep and the bar only trims stubs.
+ * Every other language uses 3: the Hebrew catalog has 27 shows at
+ * >=10 votes but 109 at >=3 (1,146 unfiltered, mostly unvoted stubs),
+ * and page 2 at >=3 is real, recognizable shows (Ramzor, Srugim,
+ * Manayek, Valley of Tears). Larger non-English catalogs (es/ko/fr/de:
+ * 345–1,422 shows at >=10) are unaffected in their popularity-sorted
+ * head by the lower bar. 3 excludes pure stubs while admitting real
+ * small-catalog shows.
+ */
+export function discoverMinVoteCount(language: string): number {
+  return language === 'en' ? 10 : 3;
+}
+
+/**
+ * Primary discover plans: one call per profile language, popularity
+ * sorted WITHIN that language. Two pages per language when the profile
+ * has at most two languages (the household case — Hebrew's page 2
+ * holds shows the gap analysis found missing); one page per language
+ * beyond that, to bound subrequest growth (a 6-language profile makes
+ * 6 primary + 6 genre calls instead of 18). An empty language list
+ * keeps the old combined calls (pages 1–2, threshold 10): there is no
+ * language to split by, and behavior is unchanged.
+ */
+export function primaryDiscoverPlans(languages: string[]): DiscoverPlan[] {
+  const langs = [...new Set(languages)];
+  if (langs.length === 0) {
+    return [
+      { languages: [], page: 1, minVoteCount: 10 },
+      { languages: [], page: 2, minVoteCount: 10 },
+    ];
+  }
+  const pages = langs.length <= 2 ? 2 : 1;
+  const plans: DiscoverPlan[] = [];
+  for (const lang of langs) {
+    for (let page = 1; page <= pages; page++) {
+      plans.push({ languages: [lang], page, minVoteCount: discoverMinVoteCount(lang) });
+    }
+  }
+  return plans;
+}
+
+/**
+ * Genre-discover plans (liked-show genres): page 1 per profile
+ * language, same thresholds as the primary plans. The old combined
+ * call buried non-English shows exactly like the primary calls did.
+ * Empty genre list (no liked shows yet) plans nothing.
+ */
+export function genreDiscoverPlans(languages: string[], genreIds: number[]): DiscoverPlan[] {
+  if (genreIds.length === 0) return [];
+  const langs = [...new Set(languages)];
+  if (langs.length === 0) {
+    return [{ languages: [], page: 1, minVoteCount: 10, genreIds }];
+  }
+  return langs.map((lang) => ({
+    languages: [lang],
+    page: 1,
+    minVoteCount: discoverMinVoteCount(lang),
+    genreIds,
+  }));
+}
+
+/**
+ * Per-language minimum share of a rank pool: up to 8 slots each,
+ * fewer when many languages share the pool (floor(poolSize / count)),
+ * never below 1. For a 30-slot pool: 2–3 languages -> 8 each,
+ * 4 -> 7, 5 -> 6, 6 -> 5. Returns 0 when fewer than two languages:
+ * a single-language (or unrestricted) profile needs no guarantee —
+ * the hard filter already makes every candidate that language.
+ */
+export function languagePoolMinimum(poolSize: number, languageCount: number): number {
+  if (languageCount < 2 || poolSize <= 0) return 0;
+  return Math.max(1, Math.min(8, Math.floor(poolSize / languageCount)));
+}
+
+/**
+ * Guarantee each profile language at least `minPerLanguage` slots in a
+ * rank pool, as available. `ordered` is the full score-ordered
+ * candidate list, `picked` the pool selectCapped chose from it. For
+ * each under-minimum language, the highest-ranked not-yet-picked
+ * candidates of that language swap in, each replacing the lowest-
+ * ranked picked candidate of a language that stays at or above the
+ * minimum. The result keeps score order. Best-effort by design: when
+ * a language has no more candidates in `ordered`, or no surplus
+ * victim exists (all minimums cannot fit the pool size), the pool is
+ * left as close to the minimums as possible — never invents, never
+ * drops a language below the minimum to satisfy another. Pool-only:
+ * ranking and the final Top 10 caps are untouched.
+ */
+export function ensureLanguageMinimums<T>(
+  ordered: T[],
+  picked: T[],
+  languageOf: (item: T) => string,
+  languages: string[],
+  minPerLanguage: number,
+): T[] {
+  const langs = [...new Set(languages)];
+  if (langs.length < 2 || minPerLanguage <= 0 || picked.length === 0) return picked;
+  const rankOf = new Map<T, number>();
+  ordered.forEach((item, i) => rankOf.set(item, i));
+  const rank = (item: T): number => rankOf.get(item) ?? Number.MAX_SAFE_INTEGER;
+  const inPicked = new Set<T>(picked);
+  const counts = new Map<string, number>();
+  for (const item of picked) {
+    const lang = languageOf(item);
+    counts.set(lang, (counts.get(lang) ?? 0) + 1);
+  }
+  // Swap-in candidates per language, in ranked order.
+  const spares = new Map<string, T[]>();
+  for (const item of ordered) {
+    if (inPicked.has(item)) continue;
+    const lang = languageOf(item);
+    if (!langs.includes(lang)) continue;
+    const list = spares.get(lang);
+    if (list) list.push(item);
+    else spares.set(lang, [item]);
+  }
+  const result = [...picked];
+  for (const lang of langs) {
+    let deficit = minPerLanguage - (counts.get(lang) ?? 0);
+    const queue = spares.get(lang) ?? [];
+    while (deficit > 0 && queue.length > 0) {
+      // Victim: the lowest-ranked picked item whose language stays at
+      // or above the minimum after losing it.
+      let victimIdx = -1;
+      let victimRank = -1;
+      for (let i = 0; i < result.length; i++) {
+        const item = result[i];
+        if ((counts.get(languageOf(item)) ?? 0) <= minPerLanguage) continue;
+        const r = rank(item);
+        if (r > victimRank) {
+          victimRank = r;
+          victimIdx = i;
+        }
+      }
+      if (victimIdx < 0) break;
+      const victim = result[victimIdx];
+      const incoming = queue.shift() as T;
+      counts.set(languageOf(victim), (counts.get(languageOf(victim)) ?? 0) - 1);
+      counts.set(lang, (counts.get(lang) ?? 0) + 1);
+      result[victimIdx] = incoming;
+      deficit--;
+    }
+  }
+  return result.sort((a, b) => rank(a) - rank(b));
+}
+
 // ---------------------------------------------------------------- taste sections
 //
 // The living taste summary is split into three sections (settled

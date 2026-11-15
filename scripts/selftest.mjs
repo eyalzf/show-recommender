@@ -746,5 +746,117 @@ for (let i = 0; i < toastList.MAX_TOASTS + 1; i++) {
 assert.equal(stickyList.length, toastList.MAX_TOASTS);
 assert.ok(stickyList.some((t) => t.id === 's'), 'sticky toast survives the cap');
 
+// Per-language discovery (Hebrew gap fix, 2026-11-15).
+// discoverMinVoteCount: English keeps 10; other languages use 3.
+assert.equal(util.discoverMinVoteCount('en'), 10);
+assert.equal(util.discoverMinVoteCount('he'), 3);
+assert.equal(util.discoverMinVoteCount('es'), 3);
+assert.equal(util.discoverMinVoteCount('ko'), 3);
+
+// primaryDiscoverPlans: one single-language call per language, 2 pages
+// for <= 2 languages, 1 page beyond that; empty = old combined calls.
+assert.deepEqual(util.primaryDiscoverPlans(['he', 'en']), [
+  { languages: ['he'], page: 1, minVoteCount: 3 },
+  { languages: ['he'], page: 2, minVoteCount: 3 },
+  { languages: ['en'], page: 1, minVoteCount: 10 },
+  { languages: ['en'], page: 2, minVoteCount: 10 },
+]);
+// Single-language (en-only) behavior is identical to today: same two
+// pages, same threshold — only the language param shape changes from
+// the combined list to the one language the profile has.
+assert.deepEqual(util.primaryDiscoverPlans(['en']), [
+  { languages: ['en'], page: 1, minVoteCount: 10 },
+  { languages: ['en'], page: 2, minVoteCount: 10 },
+]);
+assert.deepEqual(util.primaryDiscoverPlans(['he', 'en', 'es']), [
+  { languages: ['he'], page: 1, minVoteCount: 3 },
+  { languages: ['en'], page: 1, minVoteCount: 10 },
+  { languages: ['es'], page: 1, minVoteCount: 3 },
+]);
+assert.deepEqual(util.primaryDiscoverPlans([]), [
+  { languages: [], page: 1, minVoteCount: 10 },
+  { languages: [], page: 2, minVoteCount: 10 },
+]);
+// Duplicate languages collapse to one plan set each.
+assert.equal(util.primaryDiscoverPlans(['he', 'he', 'en']).length, 4);
+
+// genreDiscoverPlans: page 1 per language; none without genres.
+assert.deepEqual(util.genreDiscoverPlans(['he', 'en'], [35, 18]), [
+  { languages: ['he'], page: 1, minVoteCount: 3, genreIds: [35, 18] },
+  { languages: ['en'], page: 1, minVoteCount: 10, genreIds: [35, 18] },
+]);
+assert.deepEqual(util.genreDiscoverPlans(['en'], [35]), [
+  { languages: ['en'], page: 1, minVoteCount: 10, genreIds: [35] },
+]);
+assert.deepEqual(util.genreDiscoverPlans(['he', 'en'], []), []);
+assert.deepEqual(util.genreDiscoverPlans([], [35]), [
+  { languages: [], page: 1, minVoteCount: 10, genreIds: [35] },
+]);
+
+// languagePoolMinimum: up to 8 each, shrinking with more languages.
+assert.equal(util.languagePoolMinimum(30, 2), 8);
+assert.equal(util.languagePoolMinimum(30, 3), 8);
+assert.equal(util.languagePoolMinimum(30, 4), 7);
+assert.equal(util.languagePoolMinimum(30, 5), 6);
+assert.equal(util.languagePoolMinimum(30, 6), 5);
+assert.equal(util.languagePoolMinimum(30, 1), 0);
+assert.equal(util.languagePoolMinimum(30, 0), 0);
+assert.equal(util.languagePoolMinimum(0, 2), 0);
+
+// ensureLanguageMinimums.
+{
+  const item = (id, lang) => ({ id, lang });
+  const langOf = (c) => c.lang;
+  // Deficit language swaps in from spares, replacing the lowest-ranked
+  // surplus candidates; score order preserved.
+  const ordered = [
+    ...Array.from({ length: 24 }, (_, i) => item(`en${i}`, 'en')),
+    ...Array.from({ length: 10 }, (_, i) => item(`he${i}`, 'he')),
+  ];
+  const picked = ordered.slice(0, 30); // 24 en + 6 he: he below the 8 floor
+  const out = util.ensureLanguageMinimums(ordered, picked, langOf, ['he', 'en'], 8);
+  assert.equal(out.length, 30);
+  assert.equal(out.filter((c) => c.lang === 'he').length, 8);
+  assert.equal(out.filter((c) => c.lang === 'en').length, 22);
+  assert.ok(out.some((c) => c.id === 'he6') && out.some((c) => c.id === 'he7'), 'highest-ranked spares swap in');
+  assert.ok(!out.some((c) => c.id === 'en23') && !out.some((c) => c.id === 'en22'), 'lowest-ranked surplus out');
+  assert.deepEqual(out, ordered.filter((c) => out.includes(c)), 'score order preserved');
+  // No-op when minimums are already met.
+  const satisfied = util.ensureLanguageMinimums(ordered, ordered.slice(0, 30).concat(), langOf, ['he', 'en'], 6);
+  assert.deepEqual(satisfied, ordered.slice(0, 30));
+  // No-op for a single language / unrestricted profile.
+  assert.strictEqual(util.ensureLanguageMinimums(ordered, picked, langOf, ['en'], 8), picked);
+  assert.strictEqual(util.ensureLanguageMinimums(ordered, picked, langOf, [], 8), picked);
+  // Availability cap: fewer spares than the deficit — all available
+  // swap in, no invention, pool size unchanged.
+  const scarce = [
+    ...Array.from({ length: 28 }, (_, i) => item(`en${i}`, 'en')),
+    ...Array.from({ length: 5 }, (_, i) => item(`he${i}`, 'he')),
+  ];
+  const scarcePicked = scarce.slice(0, 30); // 28 en + 2 he
+  const scarceOut = util.ensureLanguageMinimums(scarce, scarcePicked, langOf, ['he', 'en'], 8);
+  assert.equal(scarceOut.length, 30);
+  assert.equal(scarceOut.filter((c) => c.lang === 'he').length, 5, 'all available Hebrew shows kept');
+  // Unmeetable minimums: no language above the floor, so no victim
+  // exists — the pool is left untouched rather than dropping one
+  // language below the floor to satisfy another.
+  const tight = [
+    ...Array.from({ length: 7 }, (_, i) => item(`a${i}`, 'he')),
+    ...Array.from({ length: 7 }, (_, i) => item(`b${i}`, 'en')),
+    ...Array.from({ length: 8 }, (_, i) => item(`c${i}`, 'es')),
+    ...Array.from({ length: 8 }, (_, i) => item(`d${i}`, 'ko')),
+    item('spare-he', 'he'),
+    item('spare-en', 'en'),
+  ];
+  const tightPicked = tight.slice(0, 30);
+  assert.deepEqual(
+    util.ensureLanguageMinimums(tight, tightPicked, langOf, ['he', 'en', 'es', 'ko'], 8),
+    tightPicked,
+  );
+  // Empty pool stays empty; zero minimum is a no-op.
+  assert.deepEqual(util.ensureLanguageMinimums(ordered, [], langOf, ['he', 'en'], 8), []);
+  assert.strictEqual(util.ensureLanguageMinimums(ordered, picked, langOf, ['he', 'en'], 0), picked);
+}
+
 await writeFile(join(root, 'node_modules', '.selftest-ok'), 'ok');
 console.log('selftest: all assertions passed');
