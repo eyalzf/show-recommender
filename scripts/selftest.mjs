@@ -68,6 +68,26 @@ assert.equal(util.classifyKind([10764]), 'casual');
 assert.equal(util.classifyKind([99]), 'deep');
 assert.equal(util.classifyKind([]), 'deep');
 
+// Hazbin rule (classification fix, 2026-11-15): Animation + Comedy
+// with no Crime/Mystery reads casual even with Drama/Sci-Fi tags.
+// IDs: 16 Animation, 10765 Sci-Fi & Fantasy, 9648 Mystery.
+assert.equal(util.classifyKind([16, 35, 18, 10765]), 'casual'); // Hazbin Hotel
+assert.equal(util.classifyKind([16, 35, 18]), 'casual');
+assert.equal(util.classifyKind([16, 35]), 'casual');
+assert.equal(util.classifyKind([16, 35, 80, 18]), 'deep'); // Crime opts out -> tie -> Drama
+assert.equal(util.classifyKind([16, 35, 9648, 18]), 'deep'); // Mystery opts out -> tie -> Drama
+assert.equal(util.classifyKind([16, 18]), 'deep'); // Animation + Drama, no Comedy -> tie -> Drama
+// Tulsa King / Eureka stay heuristic-deep; the kind-fit prompt (not
+// the heuristic) is what keeps them out of the wrong list.
+assert.equal(util.classifyKind([80, 18, 35]), 'deep'); // Tulsa King
+assert.equal(util.classifyKind([10765, 35, 18]), 'deep'); // Eureka
+// Pure-genre / tie-break regressions.
+assert.equal(util.classifyKind([16]), 'casual');
+assert.equal(util.classifyKind([10765]), 'deep');
+assert.equal(util.classifyKind([35, 10764]), 'casual');
+assert.equal(util.classifyKind([18, 99]), 'deep');
+assert.equal(util.classifyKind([35, 99]), 'casual'); // tie, no Drama -> Comedy wins
+
 // classifyType
 assert.equal(util.classifyType([10764], 3, 30, 'Returning Series'), 'reality');
 assert.equal(util.classifyType([99], 1, 4, 'Ended'), 'docuseries');
@@ -412,6 +432,32 @@ assert.equal(rerank.bestGenreOverlapAnchor([80, 18], [[80, 18], [80, 18, 9648]])
 assert.equal(rerank.bestGenreOverlapAnchor([], [[35]]), -1);
 assert.equal(rerank.bestGenreOverlapAnchor([35], []), -1);
 
+// bestKindScopedAnchor: same-kind liked shows win over cross-kind
+// ones, even at lower overlap; fallback to any liked show only when
+// no same-kind show qualifies. Kinds computed via classifyKind so the
+// test premises match production behavior.
+const kindsOf = (sets) => sets.map((s) => util.classifyKind(s));
+// Deep candidate; cross-kind casual show overlaps MORE (3) than the
+// same-kind deep show (2) — same-kind still wins.
+const scopedSetsA = [[35, 10751, 10762, 10764, 80, 18, 9648], [80, 18]];
+assert.deepEqual(kindsOf(scopedSetsA), ['casual', 'deep']);
+assert.equal(rerank.bestKindScopedAnchor([80, 18, 9648, 10765], scopedSetsA, kindsOf(scopedSetsA), 'deep'), 1);
+// Casual candidate; same-kind casual show wins over a higher-overlap deep show.
+const scopedSetsB = [[35, 10751, 10762, 80, 18, 9648], [35, 10762]];
+assert.deepEqual(kindsOf(scopedSetsB), ['deep', 'casual']);
+assert.equal(rerank.bestKindScopedAnchor([35, 10751, 10762], scopedSetsB, kindsOf(scopedSetsB), 'casual'), 1);
+// Fallback: no same-kind show qualifies -> cross-kind show is used.
+const scopedSetsC = [[35, 10751, 10762, 80, 18]];
+assert.deepEqual(kindsOf(scopedSetsC), ['casual']);
+assert.equal(rerank.bestKindScopedAnchor([80, 18], scopedSetsC, kindsOf(scopedSetsC), 'deep'), 0);
+// Same-kind show with only 1 shared genre does not block the fallback.
+const scopedSetsD = [[80], [35, 10751, 10762, 18, 9648]];
+assert.deepEqual(kindsOf(scopedSetsD), ['deep', 'casual']);
+assert.equal(rerank.bestKindScopedAnchor([80, 18, 9648], scopedSetsD, kindsOf(scopedSetsD), 'deep'), 1);
+// Nothing qualifies -> -1; ties within same-kind keep earliest.
+assert.equal(rerank.bestKindScopedAnchor([80, 18], [[35]], ['casual'], 'deep'), -1);
+assert.equal(rerank.bestKindScopedAnchor([80, 18], [[80, 18], [80, 18, 9648]], ['deep', 'deep'], 'deep'), 0);
+
 // groundRationale / templateRationale
 assert.equal(
   rerank.groundRationale('Loved it because Seinfeld fans enjoy this.', 'Seinfeld', ['Comedy'], '1994', 'en'),
@@ -507,6 +553,19 @@ const rankCands = [
   { tmdbId: 33, title: 'Gamma Toon', year: '2019', genres: ['Animation', 'Comedy'], originalLanguage: 'en', originCountry: ['US'], anchorTitle: 'The Simpsons' },
 ];
 const rankReq = llm.buildRankPrompt('Love comedies, no horror.', 'casual', rankCands, 'en');
+// Kind-fit instruction (classification fix): present in BOTH kinds'
+// prompts, kind-specific, with variety + grounding rules intact.
+assert.ok(rankReq.system.includes('KIND FIT'));
+assert.ok(rankReq.system.includes('CASUAL list'));
+assert.ok(rankReq.system.includes('OMIT shows that demand sustained attention'));
+assert.ok(rankReq.system.includes('Balance variety'));
+assert.ok(rankReq.system.includes('GROUNDING'));
+const rankReqDeep = llm.buildRankPrompt('Love dramas.', 'deep', rankCands, 'en');
+assert.ok(rankReqDeep.system.includes('KIND FIT'));
+assert.ok(rankReqDeep.system.includes('DEEP-FOCUS list'));
+assert.ok(rankReqDeep.system.includes('OMIT shows that are light, episodic, dip-in viewing'));
+assert.ok(rankReqDeep.system.includes('Balance variety'));
+assert.ok(rankReqDeep.system.includes('GROUNDING'));
 const rankOut1 = await mockProvider.generate(rankReq);
 const rankOut2 = await mockProvider.generate(rankReq);
 assert.equal(rankOut1, rankOut2);

@@ -241,6 +241,14 @@ export interface RankCandidateInput {
  * details — anything not in the candidate line does not exist for this
  * ranking. The caller replaces ungrounded rationales with a template
  * built from real data (see rerank.groundRationale).
+ *
+ * Kind-fit rule (2026-11-15 classification fix): the prompt explicitly
+ * instructs the model to OMIT candidates that do not fit the list kind,
+ * even when they match the taste text — a genre-vote misclassification
+ * (e.g. an animated comedy landing in the deep pool) must not survive
+ * on taste fit alone. The instruction adds no new prompt inputs, so the
+ * terms guardrail (user text + titles/IDs + factual labels only, never
+ * overviews/descriptions) is unchanged.
  */
 export function buildRankPrompt(
   tasteText: string,
@@ -252,6 +260,10 @@ export function buildRankPrompt(
     kind === 'casual'
       ? 'Casual: easy, low-commitment watching — light episodes you can dip into after a long day.'
       : 'Deep focus: immersive, serialized watching that rewards full attention.';
+  const kindFitLine =
+    kind === 'casual'
+      ? 'KIND FIT: this is the CASUAL list. OMIT shows that demand sustained attention or heavy serialized commitment — dense dramas, dark crime sagas, demanding serialized epics — even when they match the taste text. A show that belongs to deep-focus viewing does not belong here. Fewer than 10 genuinely fitting shows is a correct answer; say why in shortReason.'
+      : 'KIND FIT: this is the DEEP-FOCUS list. OMIT shows that are light, episodic, dip-in viewing — sitcoms, sketch shows, light animation, talk and reality — even when they match the taste text. A show that belongs to casual viewing does not belong here. Fewer than 10 genuinely fitting shows is a correct answer; say why in shortReason.';
   const lines = candidates
     .map(
       (cand) =>
@@ -266,6 +278,8 @@ export function buildRankPrompt(
       'Base every judgment ONLY on the taste description and the listed attributes (title, year, genres, language, country, anchor show). ' +
       'Balance variety across genres, eras, and countries of origin while staying relevant to the taste text: ' +
       'do not fill the list with near-identical shows (for example all animation, or all sci-fi) when relevant alternatives are listed. ' +
+      kindFitLine +
+      ' ' +
       'GROUNDING: every rationale MUST name the candidate\'s anchor show (the anchor="..." value) and cite only the listed genres/year/language. ' +
       'Do NOT invent plot details, cast, creators, shared themes, or qualities not in the list — if the anchor is missing, cite the listed genres and year instead. ' +
       'Write rationales ONLY in ' +

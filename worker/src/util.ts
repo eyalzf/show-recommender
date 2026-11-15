@@ -87,11 +87,26 @@ const DEEP_GENRE_IDS = new Set([
 /**
  * Casual vs deep-focus, v1 heuristic: genre majority wins; ties break
  * toward deep when Drama is present, toward casual when Comedy is
- * present, else deep. The LLM re-rank judges kind-fit afterwards, so a
- * misclassified show drops in its list rather than vanishing.
+ * present, else deep. Exception: Animation + Comedy together, with no
+ * Crime/Mystery, reads casual even when Drama/Sci-Fi tags along — e.g.
+ * Hazbin Hotel (Animation/Comedy/Drama/Sci-Fi & Fantasy) is an animated
+ * musical comedy, not deep-focus viewing, despite the 2-2 tie. The LLM
+ * re-rank judges kind-fit afterwards, so a misclassified show drops in
+ * its list rather than vanishing.
  * Takes genre IDs, never localized names (see module header).
  */
 export function classifyKind(genreIds: number[]): 'casual' | 'deep' {
+  // Hazbin rule: animated comedies stay casual even with Drama/Sci-Fi
+  // tags. Crime/Mystery presence opts out (dark animated crime keeps
+  // the majority vote).
+  if (
+    genreIds.includes(GENRE_ANIMATION) &&
+    genreIds.includes(GENRE_COMEDY) &&
+    !genreIds.includes(GENRE_CRIME) &&
+    !genreIds.includes(GENRE_MYSTERY)
+  ) {
+    return 'casual';
+  }
   let deep = 0;
   let casual = 0;
   for (const id of genreIds) {

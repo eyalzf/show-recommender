@@ -22,7 +22,7 @@ import {
 } from './llm';
 import { candidateEmbedText, embedTextsWithEnv } from './embeddings';
 import {
-  bestGenreOverlapAnchor,
+  bestKindScopedAnchor,
   buildShortTermTasteText,
   calibrationTargetFromLiked,
   deterministicRerank,
@@ -469,9 +469,14 @@ async function loadShowMeta(
  * Assign each candidate its retrieval anchor: the sourcing liked show
  * when TMDB recommendations brought it in, else the liked show with the
  * greatest genre overlap — at least MIN_ANCHOR_GENRE_OVERLAP shared
- * genres (a single shared genre is too weak to claim similarity). The
- * anchor title is what grounded rationales cite; null when no liked
- * show qualifies (the template rationale then cites genres/year).
+ * genres (a single shared genre is too weak to claim similarity).
+ * Overlap anchors are KIND-SCOPED: a same-kind liked show wins over a
+ * cross-kind one, so a deep-focus pick cites a deep liked show when
+ * one qualifies (a deep pick citing a casual comedy was the
+ * classification-fix complaint); any liked show is the fallback only
+ * when no same-kind show qualifies. The anchor title is what grounded
+ * rationales cite; null when no liked show qualifies (the template
+ * rationale then cites genres/year).
  */
 function assignAnchors(candidates: Candidate[], likedMeta: ShowMeta[], ctx: ProfileContext): void {
   const titleById = new Map<number, string>();
@@ -482,13 +487,14 @@ function assignAnchors(candidates: Candidate[], likedMeta: ShowMeta[], ctx: Prof
     }
   }
   const likedGenreSets = likedMeta.map((m) => m.genreIds);
+  const likedKinds = likedMeta.map((m) => classifyKind(m.genreIds));
   for (const cand of candidates) {
     if (cand.anchorIds.length > 0) {
       cand.anchorTmdbId = cand.anchorIds[0];
       cand.anchorTitle = titleById.get(cand.anchorIds[0]) ?? null;
       continue;
     }
-    const best = bestGenreOverlapAnchor(cand.genreIds, likedGenreSets);
+    const best = bestKindScopedAnchor(cand.genreIds, likedGenreSets, likedKinds, classifyKind(cand.genreIds));
     if (best >= 0) {
       cand.anchorTmdbId = likedMeta[best].tmdbId;
       cand.anchorTitle = likedMeta[best].title;

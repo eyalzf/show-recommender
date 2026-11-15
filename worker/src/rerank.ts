@@ -387,6 +387,43 @@ export function bestGenreOverlapAnchor(
   return bestOverlap >= MIN_ANCHOR_GENRE_OVERLAP ? best : -1;
 }
 
+/**
+ * Kind-scoped anchor pick: the liked show with the greatest genre
+ * overlap AMONG liked shows of the candidate's kind (parallel
+ * `likedKinds` array, same order as `likedGenreIdSets`); falls back to
+ * any liked show only when no same-kind show shares at least
+ * MIN_ANCHOR_GENRE_OVERLAP genres. Prevents a deep-focus pick citing a
+ * casual anchor (e.g. a deep candidate citing South Park) and vice
+ * versa. Ties keep the earliest index in each pass, as
+ * bestGenreOverlapAnchor. Returns -1 when nothing qualifies.
+ */
+export function bestKindScopedAnchor(
+  candidateGenreIds: number[],
+  likedGenreIdSets: number[][],
+  likedKinds: Array<'casual' | 'deep'>,
+  candidateKind: 'casual' | 'deep',
+): number {
+  const bestIn = (indices: number[]): number => {
+    let best = -1;
+    let bestOverlap = 0;
+    for (const i of indices) {
+      const overlap = candidateGenreIds.filter((id) => likedGenreIdSets[i].includes(id)).length;
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        best = i;
+      }
+    }
+    return bestOverlap >= MIN_ANCHOR_GENRE_OVERLAP ? best : -1;
+  };
+  const sameKind: number[] = [];
+  for (let i = 0; i < likedGenreIdSets.length; i++) {
+    if (likedKinds[i] === candidateKind) sameKind.push(i);
+  }
+  const scoped = bestIn(sameKind);
+  if (scoped >= 0) return scoped;
+  return bestIn(likedGenreIdSets.map((_, i) => i));
+}
+
 // ---------------------------------------------------------------- grounded rationales
 
 /**
