@@ -98,6 +98,8 @@ export interface ResolvedShow {
   autoTranslated: false;
   posterPath: string | null;
   firstAirDate: string;
+  /** TMDB community rating (0–10); shown as ★ on rail cards. */
+  voteAverage: number;
   genres: string[];
   genreIds: number[];
   originCountry: string[];
@@ -319,6 +321,7 @@ export function resolveDetail(
     autoTranslated: false,
     posterPath: detail.poster_path,
     firstAirDate: detail.first_air_date,
+    voteAverage: detail.vote_average ?? 0,
     genres: detail.genres.map((g) => g.name),
     genreIds: detail.genres.map((g) => g.id),
     originCountry: detail.origin_country,

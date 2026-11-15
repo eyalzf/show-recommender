@@ -65,6 +65,10 @@ export interface ListItemOut {
   rank: number;
   tmdbId: number;
   title: string;
+  /** Original-language title: the small English subtitle on rail cards. */
+  originalTitle: string;
+  /** TMDB community rating (0–10): the ★ on rail cards. */
+  voteAverage: number;
   type: string;
   genres: string[];
   tone: string;
@@ -437,6 +441,8 @@ async function enrichToListItems(
         rank: i + 1,
         tmdbId: show.tmdbId,
         title: show.title,
+        originalTitle: show.originalTitle,
+        voteAverage: show.voteAverage,
         type: classifyType(show.genreIds, show.numberOfSeasons, show.numberOfEpisodes, show.status),
         genres: show.genres,
         tone: toneFor(show.genreIds),

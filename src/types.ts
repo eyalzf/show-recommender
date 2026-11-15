@@ -75,6 +75,8 @@ export interface ListItem {
   rank: number;
   tmdbId: number;
   title: string;
+  originalTitle: string;
+  voteAverage: number;
   type: string;
   genres: string[];
   tone: string;

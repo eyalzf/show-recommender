@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { Profile, Rating, ShowDetail, UiLang } from '../types';
+import type { ListItem, Profile, Rating, ShowDetail, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
 
@@ -8,6 +8,9 @@ interface Props {
   lang: UiLang;
   profile: Profile;
   tmdbId: number;
+  /** Present when opened from a Top 10 rail: carries the rationale, risk,
+   * and classification chips that no longer fit on the compact card. */
+  listItem?: ListItem | null;
   onBack: () => void;
 }
 
@@ -17,7 +20,7 @@ interface Props {
  * watch" anywhere (spec §7). Saving a rating removes the show from both
  * lists (the Home screen reflects that on its next load).
  */
-export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
+export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
   const [show, setShow] = useState<ShowDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rating, setRating] = useState<Rating>('liked');
@@ -99,6 +102,24 @@ export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
             {show.autoTranslated ? <span className="chip">auto-translated</span> : null}
           </div>
           <p>{show.overview}</p>
+          {listItem ? (
+            <div className="detail-why">
+              <h3>{t(lang, 'whyRecommended')}</h3>
+              <p className="rationale">{listItem.rationale}</p>
+              {listItem.risk ? (
+                <p className="risk">{t(lang, 'detailRisk')}: {listItem.risk}</p>
+              ) : null}
+              <div className="chips">
+                <span className="chip chip-gold">{listItem.type}</span>
+                <span className="chip">{listItem.tone}</span>
+                <span className="chip">{listItem.pace}</span>
+                <span className="chip">{listItem.structure}</span>
+                {listItem.episodeMinutes > 0 ? (
+                  <span className="chip">{listItem.episodeMinutes} {t(lang, 'minEps')}</span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <p>
             <strong>{t(lang, 'detailWatchOn')}:</strong>{' '}
             {show.originLabel ?? '—'}

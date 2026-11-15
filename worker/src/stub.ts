@@ -26,6 +26,8 @@ export interface StubListItem {
   rank: number;
   tmdbId: number;
   title: string;
+  originalTitle: string;
+  voteAverage: number;
   type: 'series' | 'limited' | 'docuseries' | 'reality';
   genres: string[];
   tone: string;
@@ -44,7 +46,7 @@ export interface StubListItem {
 
 export const STUB_CASUAL: StubListItem[] = [
   {
-    rank: 1, tmdbId: 0, title: 'Kupa Rashit', type: 'series',
+    rank: 1, tmdbId: 0, title: 'Kupa Rashit', originalTitle: 'Kupa Rashit', voteAverage: 7.2, type: 'series',
     genres: ['Comedy'], tone: 'Warm', pace: 'Brisk', structure: 'episodic',
     episodeMinutes: 25, seasons: 4, totalHours: 20, language: 'Hebrew', country: 'IL',
     status: 'ongoing',
@@ -52,7 +54,7 @@ export const STUB_CASUAL: StubListItem[] = [
     risk: null, posterPath: null,
   },
   {
-    rank: 2, tmdbId: 0, title: 'A gentle British mystery', type: 'series',
+    rank: 2, tmdbId: 0, title: 'A gentle British mystery', originalTitle: 'A gentle British mystery', voteAverage: 7.0, type: 'series',
     genres: ['Mystery'], tone: 'Cosy', pace: 'Steady', structure: 'episodic',
     episodeMinutes: 45, seasons: 2, totalHours: 12, language: 'English', country: 'UK',
     status: 'ended',
@@ -63,7 +65,7 @@ export const STUB_CASUAL: StubListItem[] = [
 
 export const STUB_DEEP: StubListItem[] = [
   {
-    rank: 1, tmdbId: 0, title: 'Tehran', type: 'series',
+    rank: 1, tmdbId: 0, title: 'Tehran', originalTitle: 'Tehran', voteAverage: 7.5, type: 'series',
     genres: ['Thriller', 'Drama'], tone: 'Tense', pace: 'Fast', structure: 'serialized',
     episodeMinutes: 45, seasons: 3, totalHours: 24, language: 'Hebrew', country: 'IL',
     status: 'ongoing',

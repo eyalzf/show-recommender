@@ -3,13 +3,14 @@ import { api } from '../api';
 import type { ListItem, Profile, Rating, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
-import { ShowCard } from '../components/ShowCard';
+import { RailCard } from '../components/ShowCard';
+import { Rail } from '../components/Rail';
 import { RatingDialog, RemoveDialog } from '../components/Dialogs';
 
 interface Props {
   lang: UiLang;
   profile: Profile;
-  onOpenShow: (tmdbId: number) => void;
+  onOpenShow: (tmdbId: number, item?: ListItem) => void;
   onAdhoc: () => void;
 }
 
@@ -120,13 +121,12 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
         <span className="spinner" aria-hidden="true" />
         {t(lang, 'listsGenerating')}
       </p>
-      <div className="list-grid" aria-hidden="true">
-        {[0, 1, 2].map((i) => (
-          <div className="skeleton-card" key={i}>
+      <div className="rail-skeletons" aria-hidden="true">
+        {[0, 1, 2, 3, 4].map((i) => (
+          <div className="skeleton-card rail-skeleton" key={i}>
             <div className="skeleton-poster" />
             <div className="skeleton-body">
               <div className="skeleton-bar skeleton-bar-title" />
-              <div className="skeleton-bar" />
               <div className="skeleton-bar skeleton-bar-short" />
             </div>
           </div>
@@ -158,18 +158,18 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
               {t(lang, 'buildingList')}
             </p>
           ) : null}
-          <div className="list-grid">
+          <Rail lang={lang} label={title}>
             {items.map((item) => (
-              <ShowCard
+              <RailCard
                 key={`${title}-${item.tmdbId}-${item.rank}`}
                 item={item}
                 lang={lang}
                 onRemove={setRemoveTarget}
                 onRate={setRateTarget}
-                onOpen={(i) => onOpenShow(i.tmdbId)}
+                onOpen={(i) => onOpenShow(i.tmdbId, i)}
               />
             ))}
-          </div>
+          </Rail>
           {reason && items.length < 10 && !generating ? (
             <p className="short-reason">{reason}</p>
           ) : null}

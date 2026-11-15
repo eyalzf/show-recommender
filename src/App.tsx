@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
-import type { Profile, ScreenName, UiLang } from './types';
+import type { ListItem, Profile, ScreenName, UiLang } from './types';
 import { detectLang, t } from './i18n';
 import { ProfilePicker } from './screens/ProfilePicker';
 import { Onboarding } from './screens/Onboarding';
@@ -31,6 +31,7 @@ export function App() {
   const [onboardingProfile, setOnboardingProfile] = useState<Profile | null>(null);
   const [screen, setScreen] = useState<ScreenName>('picker');
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [detailItem, setDetailItem] = useState<ListItem | null>(null);
   const [addWatchedOpen, setAddWatchedOpen] = useState(false);
   const [homeKey, setHomeKey] = useState(0);
 
@@ -65,8 +66,12 @@ export function App() {
     setActiveProfile((prev) => (prev && prev.id === updated.id ? updated : prev));
   };
 
-  const openShow = (tmdbId: number) => {
+  const openShow = (tmdbId: number, item?: ListItem) => {
     setDetailId(tmdbId);
+    // The list item carries the rationale + classification chips, which
+    // live in detail now that rail cards are compact. Opened from
+    // anywhere else (search, ad-hoc), there is no list context.
+    setDetailItem(item ?? null);
     setScreen('detail');
   };
 
@@ -77,6 +82,7 @@ export function App() {
    */
   const enterProfile = (p: Profile) => {
     setDetailId(null);
+    setDetailItem(null);
     if (isIncomplete(p)) {
       setActiveProfile(null);
       setOnboardingProfile(p);
@@ -92,6 +98,7 @@ export function App() {
     setActiveProfile(null);
     setOnboardingProfile(null);
     setDetailId(null);
+    setDetailItem(null);
     setScreen('picker');
     void loadProfiles();
   };
@@ -207,7 +214,7 @@ export function App() {
             onAdhoc={() => setScreen('adhoc')}
           />
         ) : screen === 'detail' && detailId != null && activeProfile ? (
-          <ShowDetail lang={lang} profile={activeProfile} tmdbId={detailId} onBack={() => setScreen('home')} />
+          <ShowDetail lang={lang} profile={activeProfile} tmdbId={detailId} listItem={detailItem} onBack={() => setScreen('home')} />
         ) : screen === 'taste' && activeProfile ? (
           <TasteProfile lang={lang} profile={activeProfile} onProfileChanged={handleProfileChanged} />
         ) : screen === 'recommendations' && activeProfile ? (

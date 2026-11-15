@@ -20,6 +20,31 @@ await build({
 const util = await import(outFile);
 await unlink(outFile).catch(() => {});
 
+// Rail scroll direction helpers (src/railScroll.ts): pure, tested for
+// both LTR and RTL — no real browser is available in this environment.
+const railOutFile = join(root, 'node_modules', '.selftest-rail.mjs');
+await build({
+  entryPoints: [join(root, 'src', 'railScroll.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  outfile: railOutFile,
+  logLevel: 'silent',
+});
+const rail = await import(railOutFile);
+await unlink(railOutFile).catch(() => {});
+
+// railScrollDelta: forward reveals the next cards in both directions.
+assert.equal(rail.railScrollDelta('ltr', true, 800), 800);
+assert.equal(rail.railScrollDelta('ltr', false, 800), -800);
+assert.equal(rail.railScrollDelta('rtl', true, 800), -800);
+assert.equal(rail.railScrollDelta('rtl', false, 800), 800);
+assert.ok(rail.railScrollDelta('ltr', true, 0) === 0);
+assert.ok(rail.railScrollDelta('rtl', true, 0) === 0);
+// railArrowGlyphs: the forward arrow points LEFT in RTL, RIGHT in LTR.
+assert.deepEqual(rail.railArrowGlyphs('en'), { forward: '›', back: '‹' });
+assert.deepEqual(rail.railArrowGlyphs('he'), { forward: '‹', back: '›' });
+
 // normalizeTitle
 assert.equal(util.normalizeTitle('Fauda!'), 'fauda');
 assert.equal(util.normalizeTitle('  Kupa   Rashit '), 'kupa rashit');
