@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { normalizeTitle } from './util';
+import { normalizeTitle, parseTasteSummary, serializeTasteSummary, type TasteSections } from './util';
 
 /**
  * D1 access for profile-scoped state. Every function here takes an
@@ -66,6 +66,8 @@ export interface ProfileContext {
   excludedIds: Set<number>;
   overrides: Map<number, OverrideRow>;
   tasteSummary: string | null;
+  /** Stored summary parsed into Shared/Casual/Deep sections (see util.ts storage note). Legacy plain text reads as Shared-only. */
+  tasteSections: TasteSections;
   externalRecs: ExternalRecRow[];
 }
 
@@ -236,6 +238,7 @@ export async function loadProfileContext(
   }));
 
   const showFeedback = feedback.filter((f) => f.kind === 'show').slice().reverse();
+  const summaryText = summary?.summary_text ?? null;
   return {
     profile,
     feedback,
@@ -248,7 +251,8 @@ export async function loadProfileContext(
     denyIds,
     excludedIds,
     overrides,
-    tasteSummary: summary?.summary_text ?? null,
+    tasteSummary: summaryText,
+    tasteSections: parseTasteSummary(summaryText),
     externalRecs,
   };
 }
@@ -322,6 +326,29 @@ export async function saveTasteSummary(
     )
     .bind(profileId, uiLang, summaryText, Date.now())
     .run();
+}
+
+/** Read just the stored summary, parsed into sections. No other state. */
+export async function loadTasteSections(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+): Promise<TasteSections> {
+  const row = await db
+    .prepare('SELECT summary_text FROM taste_summaries WHERE profile_id = ? AND ui_language = ?')
+    .bind(profileId, uiLang)
+    .first<{ summary_text: string }>();
+  return parseTasteSummary(row?.summary_text ?? null);
+}
+
+/** Save sectioned summary (serialized; plain text when only Shared set). */
+export async function saveTasteSections(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+  sections: TasteSections,
+): Promise<void> {
+  await saveTasteSummary(db, profileId, uiLang, serializeTasteSummary(sections));
 }
 
 /**

@@ -76,11 +76,63 @@ const con = util.parseConsolidationResponse(
   '{"summary": "Loves drama.", "contradictions": [{"oldText": "a", "newText": "b", "proposedMerge": "c"}], "languageConflict": {"languageCode": "ko", "languageName": "Korean"}}',
 );
 assert.equal(con.summary, 'Loves drama.');
+assert.equal(con.sections.shared, 'Loves drama.');
+assert.equal(con.sections.casual, '');
 assert.equal(con.contradictions.length, 1);
+assert.equal(con.contradictions[0].scope, 'shared'); // legacy: no scope -> shared
 assert.equal(con.languageConflict.languageCode, 'ko');
 const plain = util.parseConsolidationResponse('Just a plain summary.');
 assert.equal(plain.summary, 'Just a plain summary.');
+assert.equal(plain.sections.shared, 'Just a plain summary.');
 assert.equal(plain.contradictions.length, 0);
+
+// parseConsolidationResponse: sectioned contract + scoped contradictions
+const sec = util.parseConsolidationResponse(
+  '{"summary": {"shared": "Loves drama.", "casual": "Light evenings only.", "deep": "Slow burns welcome."}, "contradictions": [{"scope": "casual", "oldText": "a", "newText": "b", "proposedMerge": "c"}, {"scope": "bogus", "oldText": "d", "newText": "e", "proposedMerge": "f"}], "languageConflict": null}',
+);
+assert.equal(sec.sections.shared, 'Loves drama.');
+assert.equal(sec.sections.casual, 'Light evenings only.');
+assert.equal(sec.sections.deep, 'Slow burns welcome.');
+assert.equal(sec.summary, 'Loves drama.\nLight evenings only.\nSlow burns welcome.');
+assert.equal(sec.contradictions.length, 2);
+assert.equal(sec.contradictions[0].scope, 'casual');
+assert.equal(sec.contradictions[1].scope, 'shared'); // invalid scope -> shared
+assert.equal(sec.languageConflict, null);
+
+// Taste sections: storage round-trip + legacy fallback
+assert.deepEqual(util.parseTasteSummary(null), { shared: '', casual: '', deep: '' });
+assert.deepEqual(util.parseTasteSummary(''), { shared: '', casual: '', deep: '' });
+assert.deepEqual(util.parseTasteSummary('Plain old summary.'), {
+  shared: 'Plain old summary.',
+  casual: '',
+  deep: '',
+});
+assert.deepEqual(util.parseTasteSummary('{"not": "a summary"}'), {
+  shared: '{"not": "a summary"}',
+  casual: '',
+  deep: '',
+});
+const stored = util.serializeTasteSummary({ shared: 's', casual: 'c', deep: 'd' });
+assert.deepEqual(util.parseTasteSummary(stored), { shared: 's', casual: 'c', deep: 'd' });
+assert.equal(util.serializeTasteSummary({ shared: 'only shared', casual: '', deep: '' }), 'only shared');
+assert.equal(util.serializeTasteSummary({ shared: '', casual: '', deep: '' }), '');
+assert.equal(
+  util.tasteTextForKind({ shared: 's', casual: 'c', deep: 'd' }, 'casual'),
+  's\nc',
+);
+assert.equal(
+  util.tasteTextForKind({ shared: 's', casual: '', deep: 'd' }, 'casual'),
+  's',
+);
+assert.equal(
+  util.combineTasteSections({ shared: 's', casual: '', deep: 'd' }),
+  's\nd',
+);
+assert.equal(
+  util.formatSectionsForPrompt({ shared: 's', casual: 'c', deep: '' }),
+  '[Shared] s\n[Casual] c',
+);
+assert.equal(util.formatSectionsForPrompt({ shared: '', casual: '', deep: '' }), '');
 
 // detectLanguageConflict
 assert.equal(

@@ -141,6 +141,95 @@ export function displaySeasons(
   return numberOfSeasons;
 }
 
+// ---------------------------------------------------------------- taste sections
+//
+// The living taste summary is split into three sections (settled
+// 2026-11-15): Shared (applies to both lists), Casual (casual watching
+// only), Deep focus (deep-focus watching only). Free-text notes are
+// routed into sections by the consolidation LLM; rating-derived
+// statements always land in Shared; anything ambiguous defaults to
+// Shared. Contradictions are scoped: only same-section conflicts flag.
+//
+// STORAGE: taste_summaries.summary_text holds either legacy plain text
+// (read as Shared-only — lossless, no migration needed, existing rows
+// are never rewritten) or a versioned JSON object
+// {"v":1,"shared":"...","casual":"...","deep":"..."}. Serialization
+// writes plain text whenever only Shared is non-empty, so the legacy
+// shape survives until a profile actually has sectioned content.
+
+export type TasteSectionKey = 'shared' | 'casual' | 'deep';
+
+export interface TasteSections {
+  shared: string;
+  casual: string;
+  deep: string;
+}
+
+export const EMPTY_TASTE_SECTIONS: TasteSections = { shared: '', casual: '', deep: '' };
+
+const TASTE_SUMMARY_VERSION = 1;
+
+export function isTasteSectionKey(value: unknown): value is TasteSectionKey {
+  return value === 'shared' || value === 'casual' || value === 'deep';
+}
+
+/** Parse stored summary text into sections; legacy plain text = Shared. */
+export function parseTasteSummary(text: string | null | undefined): TasteSections {
+  if (!text || !text.trim()) return { ...EMPTY_TASTE_SECTIONS };
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        v?: unknown;
+        shared?: unknown;
+        casual?: unknown;
+        deep?: unknown;
+      };
+      if (parsed && parsed.v === TASTE_SUMMARY_VERSION) {
+        return {
+          shared: typeof parsed.shared === 'string' ? parsed.shared : '',
+          casual: typeof parsed.casual === 'string' ? parsed.casual : '',
+          deep: typeof parsed.deep === 'string' ? parsed.deep : '',
+        };
+      }
+    } catch {
+      // Not JSON — fall through to legacy plain-text handling.
+    }
+  }
+  return { shared: trimmed, casual: '', deep: '' };
+}
+
+/** Serialize sections for storage: plain text when only Shared is set. */
+export function serializeTasteSummary(sections: TasteSections): string {
+  const shared = sections.shared.trim();
+  const casual = sections.casual.trim();
+  const deep = sections.deep.trim();
+  if (!casual && !deep) return shared;
+  return JSON.stringify({ v: TASTE_SUMMARY_VERSION, shared, casual, deep });
+}
+
+/** Taste text for one list kind: Shared + that kind's section. */
+export function tasteTextForKind(sections: TasteSections, kind: 'casual' | 'deep'): string {
+  return [sections.shared.trim(), sections[kind].trim()].filter(Boolean).join('\n');
+}
+
+/** All sections joined: retrieval embedding text + legacy display text. */
+export function combineTasteSections(sections: TasteSections): string {
+  return [sections.shared, sections.casual, sections.deep]
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** Labeled sections for the consolidation prompt's "current summary". */
+export function formatSectionsForPrompt(sections: TasteSections): string {
+  const lines: string[] = [];
+  if (sections.shared.trim()) lines.push(`[Shared] ${sections.shared.trim()}`);
+  if (sections.casual.trim()) lines.push(`[Casual] ${sections.casual.trim()}`);
+  if (sections.deep.trim()) lines.push(`[Deep focus] ${sections.deep.trim()}`);
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------- LLM output parsing
 
 export interface RankedEntry {
@@ -195,21 +284,48 @@ export function parseRankResponse(text: string, validIds: Set<number>): RankResp
 }
 
 export interface Contradiction {
+  /** The section the conflict lives in; cross-section pairs never flag. */
+  scope: TasteSectionKey;
   oldText: string;
   newText: string;
   proposedMerge: string;
 }
 
 export interface ConsolidationResult {
+  /** Combined text (all sections joined) — backward-compatible display. */
   summary: string;
+  sections: TasteSections;
   contradictions: Contradiction[];
   languageConflict: { languageCode: string; languageName: string } | null;
 }
 
+function sectionsFromConsolidationJson(parsed: {
+  summary?: unknown;
+  sections?: unknown;
+}): TasteSections | null {
+  const raw = parsed.summary ?? parsed.sections;
+  if (typeof raw === 'string') {
+    // Legacy single-string contract: the whole summary is Shared.
+    return raw.trim() ? { shared: raw.trim(), casual: '', deep: '' } : null;
+  }
+  if (raw && typeof raw === 'object') {
+    const rec = raw as { shared?: unknown; casual?: unknown; deep?: unknown };
+    const sections: TasteSections = {
+      shared: typeof rec.shared === 'string' ? rec.shared.trim() : '',
+      casual: typeof rec.casual === 'string' ? rec.casual.trim() : '',
+      deep: typeof rec.deep === 'string' ? rec.deep.trim() : '',
+    };
+    return sections.shared || sections.casual || sections.deep ? sections : null;
+  }
+  return null;
+}
+
 /**
  * Parse the consolidation response. Accepts the JSON contract
- * {summary, contradictions, languageConflict}; falls back to treating
- * the whole output as the summary when it is plain text.
+ * {summary: {shared, casual, deep} | string, contradictions, languageConflict};
+ * falls back to treating the whole output as a Shared-only summary when
+ * it is plain text. Contradictions without a valid scope default to
+ * Shared (the pre-section contract).
  */
 export function parseConsolidationResponse(text: string): ConsolidationResult {
   const trimmed = text.trim();
@@ -219,21 +335,29 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
     try {
       const parsed = JSON.parse(trimmed.slice(start, end + 1)) as {
         summary?: unknown;
+        sections?: unknown;
         contradictions?: unknown;
         languageConflict?: unknown;
       };
-      if (typeof parsed.summary === 'string' && parsed.summary.trim()) {
+      const sections = sectionsFromConsolidationJson(parsed);
+      if (sections) {
         const contradictions: Contradiction[] = [];
         if (Array.isArray(parsed.contradictions)) {
           for (const c of parsed.contradictions) {
             if (!c || typeof c !== 'object') continue;
-            const rec = c as { oldText?: unknown; newText?: unknown; proposedMerge?: unknown };
+            const rec = c as {
+              scope?: unknown;
+              oldText?: unknown;
+              newText?: unknown;
+              proposedMerge?: unknown;
+            };
             if (
               typeof rec.oldText === 'string' &&
               typeof rec.newText === 'string' &&
               typeof rec.proposedMerge === 'string'
             ) {
               contradictions.push({
+                scope: isTasteSectionKey(rec.scope) ? rec.scope : 'shared',
                 oldText: rec.oldText,
                 newText: rec.newText,
                 proposedMerge: rec.proposedMerge,
@@ -246,13 +370,23 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
         if (lc && typeof lc.languageCode === 'string' && typeof lc.languageName === 'string') {
           languageConflict = { languageCode: lc.languageCode, languageName: lc.languageName };
         }
-        return { summary: parsed.summary.trim(), contradictions, languageConflict };
+        return {
+          summary: combineTasteSections(sections),
+          sections,
+          contradictions,
+          languageConflict,
+        };
       }
     } catch {
       // Fall through to plain-text handling.
     }
   }
-  return { summary: trimmed, contradictions: [], languageConflict: null };
+  return {
+    summary: trimmed,
+    sections: { shared: trimmed, casual: '', deep: '' },
+    contradictions: [],
+    languageConflict: null,
+  };
 }
 
 // ---------------------------------------------------------------- language-conflict heuristic

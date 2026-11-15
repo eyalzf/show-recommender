@@ -1,5 +1,5 @@
 import { ApiError } from './types';
-import type { ListItem, Profile, SearchHit, ShowDetail, ShowFeedbackEntry, UiLang } from './types';
+import type { ListItem, Profile, SearchHit, ShowDetail, ShowFeedbackEntry, TasteContradiction, TasteSections, UiLang } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -20,9 +20,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export interface TasteResponse {
   stub?: boolean;
   summary: string;
+  sections: TasteSections;
   summaryLanguage: string;
   notes: { id: string; kind: string; text: string; createdAt: number }[];
-  contradiction: { oldText: string; newText: string; proposedMerge: string } | null;
+  contradiction: TasteContradiction | null;
   languageConflict: { praisedLanguage: string; languageCode?: string; message: string } | null;
   profile?: Profile;
 }
@@ -121,16 +122,17 @@ export const api = {
   taste: (profileId: string, lang: UiLang) =>
     req<TasteResponse>(`/api/taste?profileId=${encodeURIComponent(profileId)}&lang=${lang}`),
 
-  updateTaste: (profileId: string, lang: UiLang, summary: string) =>
+  updateTaste: (profileId: string, lang: UiLang, sections: TasteSections) =>
     req<{ ok: true }>('/api/taste', {
       method: 'PUT',
-      body: JSON.stringify({ profileId, lang, summary }),
+      body: JSON.stringify({ profileId, lang, sections }),
     }),
 
   consolidate: (profileId: string, lang: UiLang) =>
     req<{
       summary: string;
-      contradictions: { oldText: string; newText: string; proposedMerge: string }[];
+      sections: TasteSections;
+      contradictions: TasteContradiction[];
       languageConflict: { languageCode: string; languageName: string; message?: string } | null;
       provider: string;
       stub?: boolean;

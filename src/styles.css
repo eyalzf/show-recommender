@@ -440,6 +440,16 @@ html[dir="rtl"] .stepper-step { padding: 8px 8px 8px 16px; }
 .ok-note { color: var(--ok); font-weight: 600; }
 .summary-text { font-size: 1.05rem; line-height: 1.7; }
 
+.taste-hint { color: var(--muted); font-size: 0.95rem; line-height: 1.6; }
+.taste-section {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card); padding: 16px 18px; margin: 14px 0;
+}
+.taste-section h3 { margin: 0 0 8px; }
+.taste-section .summary-text { margin: 0 0 10px; }
+.taste-section textarea { width: 100%; }
+.summary-empty { color: var(--dim); font-style: italic; margin: 0 0 10px; }
+
 .contradiction {
   border: 1px solid var(--warn-line); background: var(--warn-bg);
   border-radius: var(--radius); padding: 14px 16px; margin: 16px 0; color: var(--gold-text);

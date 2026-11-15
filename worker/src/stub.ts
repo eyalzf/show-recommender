@@ -77,6 +77,14 @@ export const STUB_TASTE = {
     'We love Israeli and British drama with dry humour and moral grey areas. ' +
     'In Spanish we only watch drama, never comedies. We drop anything bleak ' +
     'without relief, and prefer episodes under 50 minutes on weeknights.',
+  sections: {
+    shared:
+      'We love Israeli and British drama with dry humour and moral grey areas. ' +
+      'In Spanish we only watch drama, never comedies. We drop anything bleak ' +
+      'without relief, and prefer episodes under 50 minutes on weeknights.',
+    casual: '',
+    deep: '',
+  },
   summaryLanguage: 'en',
   notes: [
     { id: 'n1', kind: 'like', text: 'More workplace comedies', createdAt: Date.now() - 86400000 },
@@ -84,6 +92,7 @@ export const STUB_TASTE = {
     { id: 'n3', kind: 'like', text: 'Loved the slow burn of the last pick', createdAt: Date.now() - 3600000 },
   ],
   contradiction: {
+    scope: 'shared',
     oldText: 'We avoid slow-paced shows.',
     newText: 'Loved the slow burn of the last pick.',
     proposedMerge: 'Slow is fine when the dialogue carries it.',

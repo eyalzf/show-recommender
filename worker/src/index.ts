@@ -20,6 +20,7 @@ import {
 import {
   buildConsolidationPrompt,
   getLlmProvider,
+  type ConsolidationNote,
 } from './llm';
 import {
   bootstrapStatusFromFeedback,
@@ -34,15 +35,22 @@ import {
   loadProfile,
   loadProfileContext,
   loadStoredLists,
+  loadTasteSections,
   matchFeedbackForShow,
   saveStoredList,
-  saveTasteSummary,
+  saveTasteSections,
   updateProfile,
   type BootstrapStatus,
 } from './db';
 import { generateAdhocPick, generateLists, type GeneratedLists } from './engine';
 import { loadKnownNames, recomputePeopleScores } from './trust';
-import { detectLanguageConflict, parseConsolidationResponse } from './util';
+import {
+  combineTasteSections,
+  detectLanguageConflict,
+  parseConsolidationResponse,
+  parseTasteSummary,
+  type TasteSections,
+} from './util';
 import {
   STUB_CASUAL,
   STUB_DEEP,
@@ -616,7 +624,8 @@ app.get('/api/taste', async (c: Ctx) => {
   ];
   const conflict = detectLanguageConflict(allTexts, ctx.profile.languages);
   return c.json({
-    summary: ctx.tasteSummary ?? '',
+    summary: combineTasteSections(ctx.tasteSections),
+    sections: ctx.tasteSections,
     summaryLanguage: lang,
     notes: ctx.notes
       .slice()
@@ -643,17 +652,46 @@ app.get('/api/taste', async (c: Ctx) => {
 });
 
 // Direct edit of the living summary (history row kept; raw log untouched).
+// Accepts `sections` ({shared, casual, deep} — partial updates merge over
+// the stored sections) or a legacy `summary` string, which replaces ONLY
+// the Shared section so existing Casual/Deep content is never clobbered.
 app.put('/api/taste', async (c: Ctx) => {
   const denied = dbRequired(c);
   if (denied) return denied;
   const body = await c.req.json().catch(() => ({}));
-  const { profileId, lang, summary } = body as { profileId?: string; lang?: string; summary?: string };
-  if (!profileId || typeof summary !== 'string') {
-    return c.json({ error: 'bad_request', message: 'profileId and summary are required.' }, 400);
+  const { profileId, lang, summary, sections } = body as {
+    profileId?: string;
+    lang?: string;
+    summary?: string;
+    sections?: Partial<TasteSections>;
+  };
+  if (!profileId || (typeof summary !== 'string' && sections === undefined)) {
+    return c.json({ error: 'bad_request', message: 'profileId and summary or sections are required.' }, 400);
   }
   await requireProfileAccess(c, profileId);
   const uiLang = lang === 'he' ? 'he' : 'en';
-  await saveTasteSummary(c.env.DB!, profileId, uiLang, summary);
+  const existing = await loadTasteSections(c.env.DB!, profileId, uiLang);
+  if (sections !== undefined) {
+    if (!sections || typeof sections !== 'object' || Array.isArray(sections)) {
+      return c.json({ error: 'bad_request', message: 'sections must be an object.' }, 400);
+    }
+    const next: TasteSections = { ...existing };
+    for (const key of ['shared', 'casual', 'deep'] as const) {
+      const value = (sections as Record<string, unknown>)[key];
+      if (value !== undefined) {
+        if (typeof value !== 'string') {
+          return c.json({ error: 'bad_request', message: `sections.${key} must be a string.` }, 400);
+        }
+        next[key] = value;
+      }
+    }
+    await saveTasteSections(c.env.DB!, profileId, uiLang, next);
+  } else {
+    await saveTasteSections(c.env.DB!, profileId, uiLang, {
+      ...existing,
+      shared: summary as string,
+    });
+  }
   await invalidateLists(c.env.DB!, profileId);
   return c.json({ ok: true });
 });
@@ -670,8 +708,8 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
   const uiLang = lang === 'he' ? 'he' : 'en';
   const provider = getLlmProvider(c.env);
 
-  let notes: { kind: string; text: string; createdAt: number }[] = [];
-  let existing: string | null = null;
+  let notes: ConsolidationNote[] = [];
+  let existing: TasteSections | null = null;
   let allowedLanguages: string[] = [];
   if (hasDb(c)) {
     const ctx = await loadProfileContext(c.env.DB!, profileId, uiLang);
@@ -679,17 +717,23 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
       return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
     }
     allowedLanguages = ctx.profile.languages;
-    existing = ctx.tasteSummary;
+    existing = ctx.tasteSections;
     notes = ctx.feedback
       .filter((f) => f.text.trim().length > 0)
       .map((f) => ({
-        kind: f.kind === 'show' ? String(f.rating ?? 'show') : String(f.rating ?? 'note'),
+        kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
+        source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
         text: f.showTitle ? `${f.showTitle}: ${f.text}` : f.text,
         createdAt: f.createdAt,
       }));
   } else {
-    notes = STUB_TASTE.notes.map((n) => ({ kind: n.kind, text: n.text, createdAt: n.createdAt }));
-    existing = STUB_TASTE.summary;
+    notes = STUB_TASTE.notes.map((n) => ({
+      kind: n.kind,
+      source: 'note' as const,
+      text: n.text,
+      createdAt: n.createdAt,
+    }));
+    existing = parseTasteSummary(STUB_TASTE.summary);
     allowedLanguages = STUB_PROFILE.languages;
   }
 
@@ -715,11 +759,12 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
   const contradictions = parsed.contradictions.slice(0, 3);
 
   if (hasDb(c) && parsed.summary) {
-    await saveTasteSummary(c.env.DB!, profileId, uiLang, parsed.summary);
+    await saveTasteSections(c.env.DB!, profileId, uiLang, parsed.sections);
     await invalidateLists(c.env.DB!, profileId);
   }
   return c.json({
     summary: parsed.summary,
+    sections: parsed.sections,
     contradictions,
     languageConflict,
     provider: provider.name,

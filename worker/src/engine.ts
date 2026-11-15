@@ -19,12 +19,14 @@ import { candidateEmbedText, embedTexts } from './embeddings';
 import {
   classifyKind,
   classifyType,
+  combineTasteSections,
   cosine,
   displaySeasons,
   normalizeTitle,
   paceFor,
   parseRankResponse,
   structureFor,
+  tasteTextForKind,
   toneFor,
   type RankedEntry,
 } from './util';
@@ -44,7 +46,9 @@ import {
  *
  * Ranking splits candidates into casual / deep-focus by a genre
  * heuristic, then the LLM re-ranks up to 30 per kind into the Top 10
- * with a rationale each. Prompts contain user text + factual labels
+ * with a rationale each. Each kind's re-rank prompt gets the Shared
+ * taste section plus its own section; retrieval embedding uses all
+ * sections joined. Prompts contain user text + factual labels
  * only (see llm.ts terms guardrail). The ranked pool stays larger than
  * 10 so removals promote; fewer than 10 are shown with a reason, never
  * padded.
@@ -138,9 +142,18 @@ function toCandidate(r: TmdbSearchResult, genreMap: Map<number, string>): Candid
   };
 }
 
-/** Taste text the ranker reads: living summary, else raw notes + likes. */
-export function tasteTextForRanking(ctx: ProfileContext): string {
-  if (ctx.tasteSummary && ctx.tasteSummary.trim()) return ctx.tasteSummary.trim();
+/**
+ * Taste text the ranker reads: the living summary, sectioned per list
+ * kind — casual gets Shared + Casual, deep gets Shared + Deep focus.
+ * Without a kind, all sections joined (retrieval embedding text).
+ * Falls back to raw notes + likes when no summary exists yet.
+ */
+export function tasteTextForRanking(ctx: ProfileContext, kind?: 'casual' | 'deep'): string {
+  const combined = combineTasteSections(ctx.tasteSections);
+  if (combined) {
+    if (!kind) return combined;
+    return tasteTextForKind(ctx.tasteSections, kind) || combined;
+  }
   const parts: string[] = [];
   for (const n of ctx.notes) {
     if (n.text.trim()) parts.push(`[${n.rating ?? 'note'}] ${n.text.trim()}`);
@@ -481,8 +494,8 @@ export async function generateLists(
     .slice(0, RANK_POOL_SIZE);
 
   const [casualRanked, deepRanked] = await Promise.all([
-    rankKind(c, 'casual', casualCands, tasteText, uiLang),
-    rankKind(c, 'deep', deepCands, tasteText, uiLang),
+    rankKind(c, 'casual', casualCands, tasteTextForRanking(ctx, 'casual'), uiLang),
+    rankKind(c, 'deep', deepCands, tasteTextForRanking(ctx, 'deep'), uiLang),
   ]);
 
   const [casualItems, deepItems] = await Promise.all([

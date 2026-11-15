@@ -37,8 +37,11 @@ Works end-to-end once deployed (with D1 bound + the TMDB secret set):
   language hard filter, per-profile authorization on every route.
 - Bootstrap: live-filtering TMDB search, 5 ratings incl. ≥1 negative +
   a free-text note, all persisted to the raw feedback log.
-- Taste: living summary (view/edit/consolidate), contradiction flow
-  (accept merge / replace / keep old), continuous like/dislike notes,
+- Taste: living summary in three sections (Shared / Casual / Deep
+  focus — free-text notes routed by the consolidation LLM, ratings
+  always Shared, ambiguous notes default to Shared), per-section
+  view/edit, contradiction flow scoped per section (accept merge /
+  replace / keep old), continuous like/dislike notes,
   language-conflict detection with an offer to add the language.
 - Lists: engine-generated Top 10 casual + Top 10 deep-focus with
   rationales, Remove/Rate quick actions, event-driven refresh (any
@@ -86,8 +89,9 @@ Retrieval, then LLM re-rank:
    external-rec boosts, and genre overlap with likes.
 4. Split into casual / deep-focus by a genre heuristic (see
    `worker/src/util.ts`), then Llama 3.3 70B re-ranks up to 30 per kind
-   into the Top 10 with a rationale each. Ids are validated against the
-   offered set: the model can never invent a show.
+   into the Top 10 with a rationale each — each kind's prompt gets the
+   Shared taste section plus its own section. Ids are validated against
+   the offered set: the model can never invent a show.
 5. Finalists are enriched through the 180-day metadata cache; the ranked
    pool (up to 30) and the Top 10 snapshot are stored per profile.
 

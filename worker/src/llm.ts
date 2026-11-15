@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import { formatSectionsForPrompt, type TasteSections } from './util';
 
 /**
  * LLM layer — one small interface, swappable providers.
@@ -87,40 +88,65 @@ export function getLlmProvider(env: Env): LlmProvider {
   return new StubLlmProvider();
 }
 
+/** One raw-log entry for consolidation. `source` decides routing: rating-derived statements always land in Shared; only free-text notes are routed by meaning. */
+export interface ConsolidationNote {
+  kind: string;
+  source: 'rating' | 'note';
+  text: string;
+  createdAt: number;
+}
+
 /**
  * Build the taste-consolidation prompt from the RAW feedback log only.
  * Input is user-authored text; no TMDB content ever enters this prompt.
  *
- * The model returns a JSON object: the consolidated summary, any
- * contradictions it spotted between new notes and the existing summary,
- * and a language conflict when the notes praise a language outside the
- * profile's hard filter. The caller falls back to plain-text handling
- * when the output is not JSON (see util.parseConsolidationResponse).
+ * The model returns a JSON object: the consolidated summary in THREE
+ * sections (Shared / Casual / Deep focus), any same-section
+ * contradictions it spotted, and a language conflict when the notes
+ * praise a language outside the profile's hard filter. The caller falls
+ * back to plain-text handling when the output is not JSON (see
+ * util.parseConsolidationResponse).
+ *
+ * Routing rules (the default-to-Shared rule is load-bearing: on any
+ * ambiguity the statement stays Shared, which is exactly the old
+ * single-summary behavior, so a routing miss costs nothing).
  */
 export function buildConsolidationPrompt(
-  rawNotes: { kind: string; text: string; createdAt: number }[],
+  rawNotes: ConsolidationNote[],
   uiLang: string,
-  existingSummary: string | null,
+  existing: TasteSections | null,
   allowedLanguages: string[] = [],
 ): LlmRequest {
-  const notes = rawNotes.map((n) => `- [${n.kind}] ${n.text}`).join('\n');
+  const notes = rawNotes.map((n) => `- [${n.source}:${n.kind}] ${n.text}`).join('\n');
+  const existingText = existing ? formatSectionsForPrompt(existing) : '';
   return {
     system:
-      'You consolidate a household TV profile\'s taste notes into one coherent ' +
-      'taste description used for ranking shows. Write ONLY in ' +
+      'You consolidate a household TV profile\'s taste notes into a taste description in THREE sections: ' +
+      'Shared (applies to both lists), Casual (casual watching only), Deep focus (deep-focus watching only). ' +
+      'Write ONLY in ' +
       (uiLang === 'he' ? 'Hebrew' : 'English') +
       '. Keep nuance (e.g. per-language likes/dislikes). Do not invent shows or preferences not in the notes. ' +
+      'ROUTING RULES — every statement goes to exactly one section: ' +
+      '1) Entries marked [rating:*] come from show ratings (liked/disliked/dropped). Their statements ALWAYS go to Shared, never to Casual or Deep focus. ' +
+      '2) Free-text notes ([note:*]) are routed by meaning. Explicit mode wording routes directly: "for casual", "light evenings", "when tired", "background watching" go to Casual; "for deep focus", "when I can concentrate", "immersive", "full attention" go to Deep focus — Hebrew equivalents too: "קליל", "ערב קליל", "כשעייפים", "ברקע" go to Casual; "מעמיק", "מיקוד עמוק", "כשאפשר להתרכז", "דורש ריכוז", "סוחף" go to Deep focus. ' +
+      '3) Implicit cues: lightness, ease, background-friendliness, short-and-simple, easy to dip into go to Casual; depth, complexity, serialization, demands attention, slow burn go to Deep focus. ' +
+      '4) Genre, topic, language, and content likes/dislikes ("love Israeli drama", "no horror") go to Shared. ' +
+      '5) WHEN IN DOUBT, Shared. Anything ambiguous defaults to Shared — never guess a mode. ' +
+      'Preserve the existing summary\'s sectioning: keep statements in their current sections unless a note moves them. ' +
+      'CONTRADICTIONS are scoped: list one ONLY when a newer note genuinely conflicts with the current summary or an older note WITHIN THE SAME SECTION. ' +
+      'A Casual statement and a Deep-focus statement that look opposed (e.g. "nothing slow" for casual vs "love a slow burn" for deep focus) are NOT a contradiction — they coexist in different sections, never flag them. ' +
+      'Each contradiction carries its scope, and the proposed merge must honor both sides within that scope. ' +
       'Return ONLY a JSON object with this shape, no other text: ' +
-      '{"summary": "...", "contradictions": [{"oldText": "...", "newText": "...", "proposedMerge": "..."}], ' +
+      '{"summary": {"shared": "...", "casual": "...", "deep": "..."}, "contradictions": [{"scope": "shared", "oldText": "...", "newText": "...", "proposedMerge": "..."}], ' +
       '"languageConflict": {"languageCode": "ko", "languageName": "Korean"} or null}. ' +
-      'List a contradiction only when a newer note genuinely conflicts with the current summary or an older note; ' +
-      'the proposed merge must honor both sides. Set languageConflict only when the notes praise a language ' +
+      'Empty sections are empty strings. ' +
+      'Set languageConflict only when the notes praise a language ' +
       `NOT in this allowed list: [${allowedLanguages.join(', ')}]. ` +
       'Language codes: he=Hebrew, en=English, es=Spanish, ko=Korean, fr=French, de=German.',
     user:
-      (existingSummary ? `Current summary:\n${existingSummary}\n\n` : '') +
+      (existingText ? `Current summary:\n${existingText}\n\n` : 'No current summary.\n\n') +
       `Raw notes (user-authored, newest last):\n${notes}\n\nWrite the updated consolidated taste description as the JSON object.`,
-    maxTokens: 800,
+    maxTokens: 1000,
   };
 }
 

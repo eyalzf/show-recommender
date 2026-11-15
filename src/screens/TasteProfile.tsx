@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { Profile, UiLang } from '../types';
+import type { Profile, TasteContradiction, TasteSectionKey, TasteSections, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
 import { ALL_LANGUAGES } from '../profileMeta';
@@ -11,17 +11,36 @@ interface Props {
   onProfileChanged?: (profile: Profile) => void;
 }
 
-/** Taste profile: living summary, contradiction flow, hard filter. */
+const SECTION_KEYS: TasteSectionKey[] = ['shared', 'casual', 'deep'];
+
+function sectionLabel(lang: UiLang, key: TasteSectionKey): string {
+  if (key === 'casual') return t(lang, 'tasteCasual');
+  if (key === 'deep') return t(lang, 'tasteDeep');
+  return t(lang, 'tasteShared');
+}
+
+function sectionsFromResponse(res: {
+  sections?: TasteSections;
+  summary: string;
+}): TasteSections {
+  // Older payloads carry only the combined string: it reads as Shared.
+  if (res.sections && typeof res.sections === 'object') {
+    return {
+      shared: res.sections.shared ?? '',
+      casual: res.sections.casual ?? '',
+      deep: res.sections.deep ?? '',
+    };
+  }
+  return { shared: res.summary ?? '', casual: '', deep: '' };
+}
+
+/** Taste profile: sectioned living summary, contradiction flow, hard filter. */
 export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
-  const [summary, setSummary] = useState('');
-  const [editing, setEditing] = useState(false);
+  const [sections, setSections] = useState<TasteSections>({ shared: '', casual: '', deep: '' });
+  const [editingSection, setEditingSection] = useState<TasteSectionKey | null>(null);
   const [draft, setDraft] = useState('');
   const [stub, setStub] = useState(false);
-  const [contradiction, setContradiction] = useState<{
-    oldText: string;
-    newText: string;
-    proposedMerge: string;
-  } | null>(null);
+  const [contradiction, setContradiction] = useState<TasteContradiction | null>(null);
   const [languageConflict, setLanguageConflict] = useState<{
     praisedLanguage: string;
     languageCode?: string;
@@ -36,8 +55,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
 
   useEffect(() => {
     api.taste(profile.id, lang).then((res) => {
-      setSummary(res.summary);
-      setDraft(res.summary);
+      setSections(sectionsFromResponse(res));
       setStub(Boolean(res.stub));
       setContradiction(res.contradiction);
       setLanguageConflict(res.languageConflict);
@@ -46,12 +64,11 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
     });
   }, [profile.id, lang]);
 
-  const saveSummary = async (text: string) => {
-    setSummary(text);
-    setDraft(text);
-    setEditing(false);
+  const saveSections = async (next: TasteSections) => {
+    setSections(next);
+    setEditingSection(null);
     try {
-      await api.updateTaste(profile.id, lang, text);
+      await api.updateTaste(profile.id, lang, next);
       setNotice(t(lang, 'tasteSaved'));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
@@ -61,6 +78,9 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       }
     }
   };
+
+  const saveSection = (key: TasteSectionKey, text: string) =>
+    saveSections({ ...sections, [key]: text });
 
   const toggleLanguage = async (code: string) => {
     const next = languages.includes(code) ? languages.filter((c) => c !== code) : [...languages, code];
@@ -121,8 +141,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
     setConsolidating(true);
     try {
       const res = await api.consolidate(profile.id, lang);
-      setSummary(res.summary);
-      setDraft(res.summary);
+      setSections(sectionsFromResponse(res));
       setContradiction(res.contradictions[0] ?? null);
       if (res.languageConflict) {
         setLanguageConflict({
@@ -148,21 +167,52 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
       {notice ? <p className="notice" role="status">{notice}</p> : null}
 
-      {editing ? (
-        <>
-          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} />
-          <button type="button" className="btn btn-primary" onClick={() => void saveSummary(draft)}>
-            {t(lang, 'save')}
-          </button>
-        </>
-      ) : (
-        <>
-          <p className="summary-text">{summary}</p>
-          <button type="button" className="btn" onClick={() => setEditing(true)}>
-            {t(lang, 'edit')}
-          </button>
-        </>
-      )}
+      <p className="taste-hint">{t(lang, 'tasteSectionsHint')}</p>
+      {SECTION_KEYS.map((key) => (
+        <div className="taste-section" key={key}>
+          <h3>{sectionLabel(lang, key)}</h3>
+          {editingSection === key ? (
+            <>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={4}
+                aria-label={sectionLabel(lang, key)}
+              />
+              <div className="dialog-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void saveSection(key, draft)}
+                >
+                  {t(lang, 'save')}
+                </button>
+                <button type="button" className="btn" onClick={() => setEditingSection(null)}>
+                  {t(lang, 'cancel')}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {sections[key].trim() ? (
+                <p className="summary-text">{sections[key]}</p>
+              ) : (
+                <p className="summary-empty">{t(lang, 'tasteEmptySection')}</p>
+              )}
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setDraft(sections[key]);
+                  setEditingSection(key);
+                }}
+              >
+                {t(lang, 'edit')}
+              </button>
+            </>
+          )}
+        </div>
+      ))}
       <button type="button" className="btn" onClick={consolidate} disabled={consolidating}>
         {consolidating ? t(lang, 'loading') : t(lang, 'refresh')}
       </button>
@@ -170,6 +220,10 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       {contradiction ? (
         <div className="contradiction">
           <h3>{t(lang, 'contradictionTitle')}</h3>
+          <p>
+            <strong>{t(lang, 'contradictionScope')}:</strong>{' '}
+            {sectionLabel(lang, contradiction.scope)}
+          </p>
           <p><strong>Old:</strong> {contradiction.oldText}</p>
           <p><strong>New:</strong> {contradiction.newText}</p>
           <p><strong>Proposed merge:</strong> {contradiction.proposedMerge}</p>
@@ -179,7 +233,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
               className="btn btn-primary"
               onClick={() => {
                 setContradiction(null);
-                void saveSummary(contradiction.proposedMerge);
+                void saveSection(contradiction.scope, contradiction.proposedMerge);
               }}
             >
               {t(lang, 'acceptMerge')}
@@ -189,7 +243,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
               className="btn"
               onClick={() => {
                 setContradiction(null);
-                void saveSummary(contradiction.newText);
+                void saveSection(contradiction.scope, contradiction.newText);
               }}
             >
               {t(lang, 'replace')}

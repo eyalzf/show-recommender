@@ -1,5 +1,22 @@
 export type UiLang = 'en' | 'he';
 export type Rating = 'liked' | 'disliked' | 'dropped';
+
+/** Taste summary sections: Shared applies to both lists; Casual/Deep focus are mode-scoped. */
+export type TasteSectionKey = 'shared' | 'casual' | 'deep';
+
+export interface TasteSections {
+  shared: string;
+  casual: string;
+  deep: string;
+}
+
+/** A contradiction flagged by consolidation — always scoped to one section. */
+export interface TasteContradiction {
+  scope: TasteSectionKey;
+  oldText: string;
+  newText: string;
+  proposedMerge: string;
+}
 export type ScreenName =
   | 'picker'
   | 'onboarding'
