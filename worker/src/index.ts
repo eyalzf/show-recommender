@@ -649,14 +649,31 @@ async function consolidateFromLog(
   const ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) return 'not_found';
   const provider = getLlmProvider(env);
+  // Every rating feeds consolidation — a rating carries its show title
+  // even without a reason ("Liked: Fauda" is a taste statement); only
+  // text-less notes are meaningless and skipped. Titles in prompts are
+  // inside the terms guardrail (titles/IDs + factual labels only).
   const notes: ConsolidationNote[] = ctx.feedback
-    .filter((f) => f.text.trim().length > 0)
+    .filter((f) =>
+      f.kind === 'show' ? Boolean(f.showTitle || f.text.trim()) : f.text.trim().length > 0,
+    )
     .map((f) => ({
       kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
       source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
-      text: f.showTitle ? `${f.showTitle}: ${f.text}` : f.text,
+      text: f.showTitle ? (f.text.trim() ? `${f.showTitle}: ${f.text}` : f.showTitle) : f.text,
       createdAt: f.createdAt,
     }));
+  if (notes.length === 0) {
+    // Nothing to consolidate from — no LLM call, nothing saved.
+    return {
+      summary: '',
+      sections: { ...ctx.tasteSections },
+      contradictions: [],
+      languageConflict: null,
+      provider: provider.name,
+    };
+  }
+  const snapshotMaxCreatedAt = ctx.feedback.reduce((m, f) => Math.max(m, f.createdAt), 0);
   const raw = await provider.generate(
     buildConsolidationPrompt(notes, uiLang, ctx.tasteSections, ctx.profile.languages),
   );
@@ -679,8 +696,17 @@ async function consolidateFromLog(
         }
       : null);
   if (parsed.summary) {
-    await saveTasteSections(db, profileId, uiLang, parsed.sections);
-    await invalidateLists(db, profileId);
+    // Staleness guard: skip saving when newer feedback landed after our
+    // snapshot — that write's own trigger consolidates the fuller log,
+    // so a slow earlier run never clobbers a fresher summary.
+    const latest = await db
+      .prepare('SELECT MAX(created_at) AS m FROM feedback_log WHERE profile_id = ?')
+      .bind(profileId)
+      .first<{ m: number | null }>();
+    if ((latest?.m ?? 0) <= snapshotMaxCreatedAt) {
+      await saveTasteSections(db, profileId, uiLang, parsed.sections);
+      await invalidateLists(db, profileId);
+    }
   }
   return {
     summary: parsed.summary,

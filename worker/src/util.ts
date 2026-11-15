@@ -472,18 +472,21 @@ function sectionsFromConsolidationJson(parsed: {
   sections?: unknown;
 }): TasteSections | null {
   const raw = parsed.summary ?? parsed.sections;
+  // No summary key at all: not the JSON contract — the caller falls
+  // back to plain-text handling. A summary key that IS present is
+  // honored even when empty: an all-empty sections object means "no
+  // taste statements", never "treat the raw JSON as the summary".
+  if (raw === undefined) return null;
   if (typeof raw === 'string') {
-    // Legacy single-string contract: the whole summary is Shared.
-    return raw.trim() ? { shared: raw.trim(), casual: '', deep: '' } : null;
+    return raw.trim() ? { shared: raw.trim(), casual: '', deep: '' } : { ...EMPTY_TASTE_SECTIONS };
   }
   if (raw && typeof raw === 'object') {
     const rec = raw as { shared?: unknown; casual?: unknown; deep?: unknown };
-    const sections: TasteSections = {
+    return {
       shared: typeof rec.shared === 'string' ? rec.shared.trim() : '',
       casual: typeof rec.casual === 'string' ? rec.casual.trim() : '',
       deep: typeof rec.deep === 'string' ? rec.deep.trim() : '',
     };
-    return sections.shared || sections.casual || sections.deep ? sections : null;
   }
   return null;
 }
@@ -492,7 +495,9 @@ function sectionsFromConsolidationJson(parsed: {
  * Parse the consolidation response. Accepts the JSON contract
  * {summary: {shared, casual, deep} | string, contradictions, languageConflict};
  * falls back to treating the whole output as a Shared-only summary when
- * it is plain text. Contradictions without a valid scope default to
+ * it is plain text (no JSON object with a summary key). An all-empty
+ * sections object is honored as empty — the raw JSON is never stored
+ * as summary text. Contradictions without a valid scope default to
  * Shared (the pre-section contract).
  */
 export function parseConsolidationResponse(text: string): ConsolidationResult {

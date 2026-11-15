@@ -162,6 +162,19 @@ assert.equal(parsed.ranked[0].tmdbId, 1);
 assert.equal(util.parseRankResponse('no json here', new Set([1])), null);
 assert.equal(util.parseRankResponse('{"ranked": []}', new Set([1])), null);
 
+// parseConsolidationResponse: all-empty sections JSON is honored as
+// empty — the raw JSON must never be stored as summary text (2026-11-15:
+// a background consolidation with no notes yet saved the JSON itself).
+const emptySec = util.parseConsolidationResponse(
+  '{"summary": {"shared": "", "casual": "", "deep": ""}, "contradictions": [], "languageConflict": null}',
+);
+assert.equal(emptySec.summary, '');
+assert.deepEqual(emptySec.sections, { shared: '', casual: '', deep: '' });
+assert.equal(emptySec.contradictions.length, 0);
+const emptyStr = util.parseConsolidationResponse('{"summary": "", "contradictions": []}');
+assert.equal(emptyStr.summary, '');
+assert.deepEqual(emptyStr.sections, { shared: '', casual: '', deep: '' });
+
 // parseConsolidationResponse: JSON contract + plain-text fallback
 const con = util.parseConsolidationResponse(
   '{"summary": "Loves drama.", "contradictions": [{"oldText": "a", "newText": "b", "proposedMerge": "c"}], "languageConflict": {"languageCode": "ko", "languageName": "Korean"}}',
