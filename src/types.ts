@@ -119,6 +119,16 @@ export interface ShowDetail {
   numberOfEpisodes: number | null;
   episodeRunTime: number[] | null;
   providers: string[];
+  /** Top-billed cast (capped server-side); [] when unavailable. */
+  cast: CastMember[];
+}
+
+/** One cast member on the show detail rail: actor, role, photo. */
+export interface CastMember {
+  tmdbId: number;
+  name: string;
+  character: string;
+  profilePath: string | null;
 }
 
 export class ApiError extends Error {

@@ -4,6 +4,7 @@ import type { Profile, Rating, SearchHit, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
 import { RatingDialog } from './Dialogs';
+import { useNotify } from './Notifications';
 
 const POSTER_THUMB = 'https://image.tmdb.org/t/p/w92';
 const POSTER_GRID = 'https://image.tmdb.org/t/p/w185';
@@ -25,7 +26,7 @@ interface RatedEntry {
   reason: string;
 }
 
-type RateTarget = Pick<SearchHit, 'tmdbId' | 'title' | 'originalLanguage'>;
+type RateTarget = Pick<SearchHit, 'tmdbId' | 'title' | 'originalLanguage' | 'posterPath'>;
 
 function yearOf(firstAirDate: string): string {
   return firstAirDate ? firstAirDate.slice(0, 4) : '';
@@ -112,28 +113,27 @@ function QuickPickCard({
 
 /**
  * The one show picker, shared by profile onboarding and "Add a show I
- * watched": debounced live search with rich rows, all-time quick picks,
- * and the shared rating dialog. Ratings persist immediately (the
- * onboarding gate reads real server state, so resuming works).
+ * watched": debounced live search with rich rows, the shared rating
+ * dialog, and (onboarding only) all-time quick picks. Ratings persist
+ * immediately (the onboarding gate reads real server state, so resuming
+ * works). "Add a show" is free-text search only — no popular list.
  */
 export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerProps) {
+  const { notify, dismiss } = useNotify();
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
   const [quickPicks, setQuickPicks] = useState<SearchHit[] | null>(null);
-  const [quickPicksFailed, setQuickPicksFailed] = useState(false);
   const [rated, setRated] = useState<Map<number, RatedEntry>>(new Map());
   const [ratingTarget, setRatingTarget] = useState<RateTarget | null>(null);
   const [note, setNote] = useState('');
   const [noteBaseline, setNoteBaseline] = useState('');
-  const [demoNotice, setDemoNotice] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [justSaved, setJustSaved] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const timer = useRef<number | null>(null);
 
-  const showQuickPicks = query.trim().length < 2;
+  // Quick picks are an onboarding affordance only: the add-a-show
+  // modal is free-text search, and never fetches or lists them.
+  const showQuickPicks = mode === 'bootstrap' && query.trim().length < 2;
 
   // Existing ratings: mark rows, drive progress, and make onboarding
   // resume exactly where it left off.
@@ -157,15 +157,15 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
       .catch(() => setRated(new Map()));
   }, [profile.id]);
 
-  // All-time quick picks (server blends popular + top-rated).
+  // All-time quick picks (server blends popular + top-rated) — bootstrap only.
   useEffect(() => {
+    if (mode !== 'bootstrap') return;
     setQuickPicks(null);
-    setQuickPicksFailed(false);
     api
       .quickPicks(profile.id, lang)
       .then((res) => setQuickPicks(res.results))
-      .catch(() => setQuickPicksFailed(true));
-  }, [profile.id, lang]);
+      .catch(() => notify(t(lang, 'searchError'), { kind: 'error', key: 'quickpicks-error' }));
+  }, [mode, profile.id, lang, notify]);
 
   // Bootstrap: prefill the taste note from the latest saved note, so a
   // resumed session shows (and doesn't duplicate) what was already written.
@@ -188,7 +188,7 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
     const q = query.trim();
     if (q.length < 2) {
       setHits([]);
-      setSearchError(null);
+      dismiss('search-error');
       return;
     }
     setSearching(true);
@@ -197,14 +197,15 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
         .search(q, lang)
         .then((res) => {
           setHits(res.results);
-          setSearchError(null);
+          dismiss('search-error');
         })
         .catch((err: unknown) => {
           setHits([]);
-          setSearchError(
+          notify(
             err instanceof ApiError && err.code === 'tmdb_not_configured'
               ? t(lang, 'tmdbMissing')
               : t(lang, 'searchError'),
+            { kind: 'error', key: 'search-error' },
           );
         })
         .finally(() => setSearching(false));
@@ -212,17 +213,27 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
-  }, [query, lang]);
+  }, [query, lang, notify, dismiss]);
 
   const ratedList = [...rated.values()];
   const negatives = ratedList.filter((r) => r.rating !== 'liked').length;
   const reached = ratedList.length >= 5 && negatives >= 1 && note.trim().length > 0;
 
+  // "Minimum reached" is a one-time event, delivered through the single
+  // notification system when the threshold is first crossed.
+  const reachedRef = useRef(false);
+  useEffect(() => {
+    if (mode !== 'bootstrap') return;
+    if (reached && !reachedRef.current) {
+      notify(t(lang, 'bootstrapReached'), { kind: 'success' });
+    }
+    reachedRef.current = reached;
+  }, [reached, mode, lang, notify]);
+
   const submitRating = async (rating: Rating, reason: string) => {
     if (!ratingTarget) return;
     const target = ratingTarget;
     setRatingTarget(null);
-    setSaveError(null);
     const prev = rated.get(target.tmdbId);
     const entry: RatedEntry = {
       tmdbId: target.tmdbId,
@@ -234,15 +245,15 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
     setRated((m) => new Map(m).set(target.tmdbId, entry));
     try {
       await api.feedback(profile.id, target.tmdbId, rating, reason, target.title, target.originalLanguage);
-      if (mode === 'add') setJustSaved(target.title);
+      if (mode === 'add') notify(t(lang, 'watchedSaved'), { kind: 'success' });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
         // Demo mode: keep the rating locally and say so.
-        setDemoNotice(true);
-        if (mode === 'add') setJustSaved(target.title);
+        notify(t(lang, 'notSaved'), { kind: 'error' });
+        if (mode === 'add') notify(t(lang, 'watchedSaved'), { kind: 'success' });
         return;
       }
-      setSaveError(t(lang, 'searchError'));
+      notify(t(lang, 'searchError'), { kind: 'error' });
       setRated((m) => {
         const next = new Map(m);
         if (prev) next.set(target.tmdbId, prev);
@@ -255,7 +266,6 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
   /** Bootstrap finish: persist the taste note if it changed, then continue. */
   const buildLists = async () => {
     setSaving(true);
-    setSaveError(null);
     try {
       const text = note.trim();
       if (text && text !== noteBaseline) {
@@ -263,9 +273,9 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
       }
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setDemoNotice(true);
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setSaveError(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
         setSaving(false);
         return;
       }
@@ -275,15 +285,12 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
   };
 
   return (
-    <div>
+    <div className={mode === 'add' ? 'picker-add' : undefined}>
       {mode === 'bootstrap' ? (
-        <>
-          <p>
-            {ratedList.length} {t(lang, 'bootstrapProgress')}
-            {negatives === 0 ? ` · ${t(lang, 'bootstrapNeedNegative')}` : ''}
-          </p>
-          {reached ? <p className="ok-note">{t(lang, 'bootstrapReached')}</p> : null}
-        </>
+        <p>
+          {ratedList.length} {t(lang, 'bootstrapProgress')}
+          {negatives === 0 ? ` · ${t(lang, 'bootstrapNeedNegative')}` : ''}
+        </p>
       ) : (
         <p className="muted">{t(lang, 'addWatchedHint')}</p>
       )}
@@ -296,16 +303,33 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
         aria-label={t(lang, 'searchPlaceholder')}
       />
 
-      {showQuickPicks ? (
-        <>
-          <h3>{t(lang, 'quickPicksTitle')}</h3>
-          {quickPicks === null && !quickPicksFailed ? <p>{t(lang, 'loading')}</p> : null}
-          {quickPicksFailed ? <p className="error-note" role="alert">{t(lang, 'searchError')}</p> : null}
-          {quickPicks !== null && quickPicks.length === 0 ? <p>{t(lang, 'quickPicksEmpty')}</p> : null}
-          {quickPicks !== null && quickPicks.length > 0 ? (
-            <div className="quick-grid">
-              {quickPicks.map((hit) => (
-                <QuickPickCard
+      <div className="picker-results">
+        {showQuickPicks ? (
+          <>
+            <h3>{t(lang, 'quickPicksTitle')}</h3>
+            {quickPicks === null ? <p>{t(lang, 'loading')}</p> : null}
+            {quickPicks !== null && quickPicks.length === 0 ? <p>{t(lang, 'quickPicksEmpty')}</p> : null}
+            {quickPicks !== null && quickPicks.length > 0 ? (
+              <div className="quick-grid">
+                {quickPicks.map((hit) => (
+                  <QuickPickCard
+                    key={hit.tmdbId}
+                    hit={hit}
+                    lang={lang}
+                    ratedRating={rated.get(hit.tmdbId)?.rating ?? null}
+                    onRate={(h) => setRatingTarget(h)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : query.trim().length >= 2 ? (
+          <>
+            {searching ? <p>{t(lang, 'loading')}</p> : null}
+            {!searching && hits.length === 0 ? <p>{t(lang, 'noResults')}</p> : null}
+            <ul className="search-results">
+              {hits.map((hit) => (
+                <SearchRow
                   key={hit.tmdbId}
                   hit={hit}
                   lang={lang}
@@ -313,49 +337,32 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
                   onRate={(h) => setRatingTarget(h)}
                 />
               ))}
-            </div>
-          ) : null}
-        </>
-      ) : (
-        <>
-          {searching ? <p>{t(lang, 'loading')}</p> : null}
-          {searchError ? <p className="error-note" role="alert">{searchError}</p> : null}
-          {!searching && !searchError && hits.length === 0 ? <p>{t(lang, 'noResults')}</p> : null}
-          <ul className="search-results">
-            {hits.map((hit) => (
-              <SearchRow
-                key={hit.tmdbId}
-                hit={hit}
-                lang={lang}
-                ratedRating={rated.get(hit.tmdbId)?.rating ?? null}
-                onRate={(h) => setRatingTarget(h)}
-              />
-            ))}
-          </ul>
-        </>
-      )}
+            </ul>
+          </>
+        ) : null}
 
-      {mode === 'bootstrap' && ratedList.length > 0 ? (
-        <>
-          <h3>{t(lang, 'ratedListTitle')}</h3>
-          <ul className="search-results">
-            {ratedList.map((r) => (
-              <li key={r.tmdbId} className="search-row">
-                <span className="search-row-title">{r.title}</span>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() =>
-                    setRatingTarget({ tmdbId: r.tmdbId, title: r.title, originalLanguage: r.originalLanguage })
-                  }
-                >
-                  {t(lang, r.rating)}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </>
-      ) : null}
+        {mode === 'bootstrap' && ratedList.length > 0 ? (
+          <>
+            <h3>{t(lang, 'ratedListTitle')}</h3>
+            <ul className="search-results">
+              {ratedList.map((r) => (
+                <li key={r.tmdbId} className="search-row">
+                  <span className="search-row-title">{r.title}</span>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() =>
+                      setRatingTarget({ tmdbId: r.tmdbId, title: r.title, originalLanguage: r.originalLanguage, posterPath: null })
+                    }
+                  >
+                    {t(lang, r.rating)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </div>
 
       {mode === 'bootstrap' ? (
         <>
@@ -373,21 +380,16 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
           </button>
         </>
       ) : (
-        <>
-          {justSaved ? <p className="ok-note" role="status">{t(lang, 'watchedSaved')}</p> : null}
-          <button type="button" className="btn btn-primary" onClick={onClose}>
-            {t(lang, 'close')}
-          </button>
-        </>
+        <button type="button" className="btn btn-primary" onClick={onClose}>
+          {t(lang, 'close')}
+        </button>
       )}
-
-      {demoNotice ? <p className="notice" role="status">{t(lang, 'notSaved')}</p> : null}
-      {saveError ? <p className="error-note" role="alert">{saveError}</p> : null}
 
       {ratingTarget ? (
         <RatingDialog
           lang={lang}
           title={ratingTarget.title}
+          posterPath={ratingTarget.posterPath}
           onSubmit={submitRating}
           onClose={() => setRatingTarget(null)}
         />

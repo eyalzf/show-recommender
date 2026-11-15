@@ -12,6 +12,7 @@ import { AdHoc } from './screens/AdHoc';
 import { ShowPicker } from './components/ShowPicker';
 import { ProfileSwitcher } from './components/ProfileSwitcher';
 import { DevBar } from './components/DevBar';
+import { NotificationProvider } from './components/Notifications';
 
 const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navTaste' | 'navRecs' }[] = [
   { screen: 'home', labelKey: 'navHome' },
@@ -139,6 +140,7 @@ export function App() {
   };
 
   return (
+    <NotificationProvider lang={lang}>
     <div className="app">
       {isDev ? (
         <DevBar lang={lang} serverProvider={serverProvider} />
@@ -250,9 +252,9 @@ export function App() {
       </main>
 
       {addWatchedOpen && activeProfile ? (
-        <div className="dialog-backdrop" onClick={closeAddWatched}>
+        <div className="dialog-backdrop dialog-backdrop--top" onClick={closeAddWatched}>
           <div
-            className="dialog"
+            className="dialog dialog--anchored"
             role="dialog"
             aria-modal="true"
             aria-label={t(lang, 'addWatchedTitle')}
@@ -278,5 +280,6 @@ export function App() {
         </p>
       </footer>
     </div>
+    </NotificationProvider>
   );
 }

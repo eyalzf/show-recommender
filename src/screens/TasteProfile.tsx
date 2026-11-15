@@ -4,6 +4,7 @@ import type { Profile, TasteContradiction, TasteSectionKey, TasteSections, UiLan
 import { ApiError } from '../types';
 import { t } from '../i18n';
 import { ALL_LANGUAGES } from '../profileMeta';
+import { useNotify } from '../components/Notifications';
 
 interface Props {
   lang: UiLang;
@@ -36,6 +37,7 @@ function sectionsFromResponse(res: {
 
 /** Taste profile: sectioned living summary, contradiction flow, hard filter. */
 export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
+  const { notify, dismiss } = useNotify();
   const [sections, setSections] = useState<TasteSections>({ shared: '', casual: '', deep: '' });
   const [editingSection, setEditingSection] = useState<TasteSectionKey | null>(null);
   const [draft, setDraft] = useState('');
@@ -49,9 +51,13 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   const [languages, setLanguages] = useState<string[]>(profile.languages);
   const [note, setNote] = useState('');
   const [updating, setUpdating] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [loadingTaste, setLoadingTaste] = useState(true);
   // Guards the post-note polling loop against unmount.
   const aliveRef = useRef(true);
+  // Fresh languages for the conflict toast action, whose closure is
+  // frozen when the toast is shown (see the conflict effect below).
+  const languagesRef = useRef(languages);
+  languagesRef.current = languages;
   useEffect(() => {
     aliveRef.current = true;
     return () => {
@@ -60,13 +66,20 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   }, []);
 
   useEffect(() => {
-    api.taste(profile.id, lang).then((res) => {
-      setSections(sectionsFromResponse(res));
-      setStub(Boolean(res.stub));
-      setContradiction(res.contradiction);
-      setLanguageConflict(res.languageConflict);
-      if (res.profile) setLanguages(res.profile.languages);
-    });
+    setLoadingTaste(true);
+    api
+      .taste(profile.id, lang)
+      .then((res) => {
+        setSections(sectionsFromResponse(res));
+        setStub(Boolean(res.stub));
+        setContradiction(res.contradiction);
+        setLanguageConflict(res.languageConflict);
+        if (res.profile) setLanguages(res.profile.languages);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (aliveRef.current) setLoadingTaste(false);
+      });
   }, [profile.id, lang]);
 
   const saveSections = async (next: TasteSections) => {
@@ -74,12 +87,12 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
     setEditingSection(null);
     try {
       await api.updateTaste(profile.id, lang, next);
-      setNotice(t(lang, 'tasteSaved'));
+      notify(t(lang, 'tasteSaved'), { kind: 'success' });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setNotice(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setNotice(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
     }
   };
@@ -92,13 +105,13 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
     setLanguages(next);
     try {
       const res = await api.updateProfile(profile.id, { languages: next });
-      setNotice(t(lang, 'languagesSaved'));
+      notify(t(lang, 'languagesSaved'), { kind: 'success' });
       onProfileChanged?.(res.profile);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setNotice(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setNotice(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
     }
   };
@@ -112,38 +125,63 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       setLanguageConflict(null);
       return;
     }
-    const next = [...new Set([...languages, code])];
+    const next = [...new Set([...languagesRef.current, code])];
     setLanguages(next);
     setLanguageConflict(null);
     try {
       const res = await api.updateProfile(profile.id, { languages: next });
       onProfileChanged?.(res.profile);
     } catch {
-      // Language chips already reflect the choice locally; the notice
+      // Language chips already reflect the choice locally; the toast
       // below covers the unsaved case.
-      setNotice(t(lang, 'notSaved'));
+      notify(t(lang, 'notSaved'), { kind: 'error' });
     }
   };
+
+  // The language conflict is an event message with an action, so it
+  // goes through the single notification system (sticky, until the
+  // conflict clears or the user dismisses it). The language chips
+  // below remain the persistent way to change languages.
+  useEffect(() => {
+    if (!languageConflict) {
+      dismiss('language-conflict');
+      return;
+    }
+    notify(languageConflict.message, {
+      key: 'language-conflict',
+      sticky: true,
+      action: {
+        label: `${t(lang, 'addLanguage')} ${languageConflict.praisedLanguage}`,
+        onClick: () => void addLanguageFromConflict(),
+      },
+    });
+    // The toast action reads the conflict through the closure on
+    // purpose: the conflict it resolves is the one that was current
+    // when the toast appeared.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [languageConflict]);
 
   const addNote = async () => {
     if (!note.trim() || updating) return;
     const text = note.trim();
     const before = JSON.stringify(sections);
     setNote('');
-    setNotice(null);
     try {
       await api.addNote(profile.id, text);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setNotice(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setNotice(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
       return;
     }
     // The server consolidates in the background on every note write.
-    // Poll until the sections change or a sane timeout, then show
-    // whatever the server returns — never hang the UI.
+    // The cards show the calculating state (below) while a sticky
+    // toast carries the progress message; both retire when the fresh
+    // sections arrive. Poll until the sections change or a sane
+    // timeout, then show whatever the server returns — never hang.
+    notify(t(lang, 'noteUpdating'), { key: 'note-updating', sticky: true });
     setUpdating(true);
     try {
       const deadline = Date.now() + 30000;
@@ -165,11 +203,18 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         }
         if (Date.now() >= deadline) break;
       }
-      if (latest && aliveRef.current) setNotice(t(lang, 'noteSaved'));
+      if (latest && aliveRef.current) notify(t(lang, 'noteSaved'), { kind: 'success' });
     } finally {
+      dismiss('note-updating');
       if (aliveRef.current) setUpdating(false);
     }
   };
+
+  // Calculating covers the initial load AND the post-note refresh: in
+  // both cases every card says so instead of appearing empty. Once the
+  // calculation settles, a genuinely empty section keeps its minimal
+  // empty presentation.
+  const calculating = loadingTaste || updating;
 
   return (
     <section>
@@ -177,7 +222,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         {t(lang, 'tasteTitle')} — {profile.name}
       </h2>
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
-      {notice ? <p className="notice" role="status">{notice}</p> : null}
 
       <p className="taste-hint">{t(lang, 'tasteSectionsHint')}</p>
       {SECTION_KEYS.map((key) => (
@@ -206,11 +250,17 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
             </>
           ) : (
             <>
+              {calculating ? (
+                <p className="building-line" role="status">
+                  <span className="spinner" aria-hidden="true" />
+                  {t(lang, 'tasteCalculating')}
+                </p>
+              ) : null}
               {sections[key].trim() ? (
-                <p className="summary-text">{sections[key]}</p>
-              ) : (
+                <p className={calculating ? 'summary-text is-stale' : 'summary-text'}>{sections[key]}</p>
+              ) : !calculating ? (
                 <p className="summary-empty">{t(lang, 'tasteEmptySection')}</p>
-              )}
+              ) : null}
               <button
                 type="button"
                 className="btn"
@@ -276,9 +326,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         <button type="button" className="btn" onClick={addNote} disabled={!note.trim() || updating}>
           {t(lang, 'addNote')}
         </button>
-        {updating ? (
-          <p className="notice" role="status">{t(lang, 'noteUpdating')}</p>
-        ) : null}
       </div>
 
       <h3>{t(lang, 'languagesLabel')}</h3>
@@ -295,14 +342,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
           </button>
         ))}
       </div>
-      {languageConflict ? (
-        <p className="notice" role="status">
-          {languageConflict.message}{' '}
-          <button type="button" className="btn btn-ghost" onClick={addLanguageFromConflict}>
-            {t(lang, 'addLanguage')} {languageConflict.praisedLanguage}
-          </button>
-        </p>
-      ) : null}
     </section>
   );
 }

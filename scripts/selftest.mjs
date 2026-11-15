@@ -656,5 +656,91 @@ const realVecs = await embeddings.embedTextsWithEnv({ AI: recordingAi, EMBEDDING
 assert.deepEqual(realVecs, [[0.5, 0.5]]);
 assert.deepEqual(embedCalls, ['emb-x']);
 
+// ---------------------------------------------------------------- cast normalization (tmdb.ts)
+
+const tmdb = await bundleModule('tmdb', 'tmdb.ts');
+
+assert.equal(tmdb.MAX_CAST_MEMBERS, 12);
+assert.equal(tmdb.creditsCacheLanguage('he'), 'credits:he-IL');
+assert.equal(tmdb.creditsCacheLanguage('en'), 'credits:en-US');
+
+const castRaw = [
+  { id: 3, name: 'Third Billed', character: 'C', profile_path: null, order: 2 },
+  { id: 1, name: 'Top Billed', character: 'A', profile_path: '/p1.jpg', order: 0 },
+  { id: 2, name: 'Second', character: '', profile_path: '/p2.jpg', order: 1 },
+];
+assert.deepEqual(tmdb.toCastMembers(castRaw), [
+  { tmdbId: 1, name: 'Top Billed', character: 'A', profilePath: '/p1.jpg' },
+  { tmdbId: 2, name: 'Second', character: '', profilePath: '/p2.jpg' },
+  { tmdbId: 3, name: 'Third Billed', character: 'C', profilePath: null },
+]);
+// Cap: 20 billed members -> 12, in billing order.
+const many = Array.from({ length: 20 }, (_, i) => ({
+  id: 100 + i, name: `Actor ${i}`, character: `Role ${i}`, profile_path: null, order: i,
+}));
+const cappedCast = tmdb.toCastMembers(many);
+assert.equal(cappedCast.length, 12);
+assert.equal(cappedCast[0].tmdbId, 100);
+assert.equal(cappedCast[11].tmdbId, 111);
+// Malformed entries are skipped, never fatal.
+assert.deepEqual(tmdb.toCastMembers(null), []);
+assert.deepEqual(tmdb.toCastMembers(undefined), []);
+assert.deepEqual(
+  tmdb.toCastMembers([
+    null,
+    { id: 'x', name: 'Bad Id', character: '', profile_path: null, order: 0 },
+    { id: 7, name: '', character: '', profile_path: null, order: 0 },
+    { id: 8, name: 'Good', character: undefined, profile_path: null, order: 0 },
+  ]),
+  [{ tmdbId: 8, name: 'Good', character: '', profilePath: null }],
+);
+
+// ---------------------------------------------------------------- toast list (src/toastList.ts)
+
+const toastOutFile = join(root, 'node_modules', '.selftest-toast.mjs');
+await build({
+  entryPoints: [join(root, 'src', 'toastList.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  outfile: toastOutFile,
+  logLevel: 'silent',
+});
+const toastList = await import(toastOutFile);
+await unlink(toastOutFile).catch(() => {});
+
+let toasts = [];
+toasts = toastList.addToast(toasts, { message: 'first' }, 'a');
+toasts = toastList.addToast(toasts, { message: 'second', kind: 'success' }, 'b');
+assert.equal(toasts.length, 2);
+assert.equal(toasts[0].kind, 'info');
+assert.equal(toasts[1].kind, 'success');
+// Keyed replace: same key replaces in place, no duplicate.
+toasts = toastList.addToast(toasts, { message: 'replaced', key: 'k1' }, 'x');
+toasts = toastList.addToast(toasts, { message: 'replacement', key: 'k1', kind: 'error' }, 'y');
+assert.equal(toasts.length, 3);
+assert.equal(toasts[2].id, 'k1');
+assert.equal(toasts[2].message, 'replacement');
+assert.equal(toasts[2].kind, 'error');
+// Dismiss by id (keys are ids).
+toasts = toastList.dismissToast(toasts, 'k1');
+assert.equal(toasts.length, 2);
+toasts = toastList.dismissToast(toasts, 'missing');
+assert.equal(toasts.length, 2);
+// Cap: past MAX_TOASTS the oldest non-sticky toast is evicted.
+let cappedToasts = [];
+for (let i = 0; i < toastList.MAX_TOASTS + 2; i++) {
+  cappedToasts = toastList.addToast(cappedToasts, { message: `m${i}` }, `id-${i}`);
+}
+assert.equal(cappedToasts.length, toastList.MAX_TOASTS);
+assert.equal(cappedToasts[0].message, 'm2');
+// Sticky toasts survive eviction while any non-sticky toast exists.
+let stickyList = toastList.addToast([], { message: 'sticky', sticky: true }, 's');
+for (let i = 0; i < toastList.MAX_TOASTS + 1; i++) {
+  stickyList = toastList.addToast(stickyList, { message: `n${i}` }, `n-${i}`);
+}
+assert.equal(stickyList.length, toastList.MAX_TOASTS);
+assert.ok(stickyList.some((t) => t.id === 's'), 'sticky toast survives the cap');
+
 await writeFile(join(root, 'node_modules', '.selftest-ok'), 'ok');
 console.log('selftest: all assertions passed');

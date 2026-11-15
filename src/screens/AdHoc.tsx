@@ -3,6 +3,7 @@ import { api } from '../api';
 import type { Profile, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
+import { useNotify } from '../components/Notifications';
 
 interface Props {
   lang: UiLang;
@@ -17,9 +18,9 @@ interface Props {
  * normal feedback.
  */
 export function AdHoc({ lang, profile, onOpenShow }: Props) {
+  const { notify } = useNotify();
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
     tmdbId: number;
     title: string;
@@ -34,16 +35,16 @@ export function AdHoc({ lang, profile, onOpenShow }: Props) {
   const ask = async () => {
     if (!query.trim()) return;
     setLoading(true);
-    setError(null);
     try {
       const res = await api.adhoc(profile.id, query.trim(), lang);
       setResult(res.result);
       setHistory((prev) => [{ query: query.trim(), title: res.result.title }, ...prev]);
     } catch (err) {
-      setError(
+      notify(
         err instanceof ApiError && err.code === 'tmdb_not_configured'
           ? t(lang, 'tmdbMissing')
           : t(lang, 'searchError'),
+        { kind: 'error', sticky: true, key: 'adhoc-error' },
       );
     } finally {
       setLoading(false);
@@ -63,7 +64,6 @@ export function AdHoc({ lang, profile, onOpenShow }: Props) {
       <button type="button" className="btn btn-primary" onClick={ask} disabled={loading || !query.trim()}>
         {loading ? t(lang, 'loading') : t(lang, 'adhocGet')}
       </button>
-      {error ? <p className="error-note" role="alert">{error}</p> : null}
       {result ? (
         <article className="card">
           {result.posterPath ? (

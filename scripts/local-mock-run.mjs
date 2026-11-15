@@ -150,6 +150,18 @@ globalThis.fetch = async (url) => {
   }
   const provMatch = /^\/3\/tv\/(\d+)\/watch\/providers$/.exec(path);
   if (provMatch) return json({ results: {} });
+  const creditsMatch = /^\/3\/tv\/(\d+)\/credits$/.exec(path);
+  if (creditsMatch) {
+    // Fixture cast: billing order, one member without a photo.
+    return json({
+      cast: [
+        { id: 9001, name: 'Lead Actor', character: 'Hero', profile_path: '/lead.jpg', order: 0 },
+        { id: 9002, name: 'Second Actor', character: 'Sidekick', profile_path: null, order: 1 },
+        { id: 9003, name: 'Third Actor', character: 'Villain', profile_path: '/third.jpg', order: 2 },
+      ],
+      crew: [],
+    });
+  }
   const detailMatch = /^\/3\/tv\/(\d+)$/.exec(path);
   if (detailMatch) {
     const f = byId.get(Number(detailMatch[1]));
@@ -317,7 +329,23 @@ console.log('bootstrap data written (5 ratings + 2 notes)');
   console.log('ad-hoc pick via mock:', body.result.title);
 }
 
-// 6. There is NO override path: a stray x-dev-llm-provider header is
+// 6. Show detail carries the top-billed cast (credits fetch + cache).
+{
+  const { status, body } = await call(MOCK_ENV, 'GET', '/api/shows/1001?lang=he');
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.ok(Array.isArray(body.show.cast), 'cast array present');
+  assert.equal(body.show.cast.length, 3);
+  assert.deepEqual(body.show.cast[0], {
+    tmdbId: 9001,
+    name: 'Lead Actor',
+    character: 'Hero',
+    profilePath: '/lead.jpg',
+  });
+  assert.equal(body.show.cast[1].profilePath, null, 'missing photo stays null (placeholder)');
+  console.log('show detail carries cast:', body.show.cast.map((m) => m.name).join(', '));
+}
+
+// 7. There is NO override path: a stray x-dev-llm-provider header is
 //    IGNORED everywhere. A dev Worker WITHOUT the LLM_PROVIDER=mock
 //    env flag takes the REAL path even with the header — the throwing
 //    AI binding fails the call, proving no request can engage the mock.
@@ -336,7 +364,7 @@ console.log('bootstrap data written (5 ratings + 2 notes)');
   console.log('stray override header ignored on dev Worker (real path attempted, failed as designed)');
 }
 
-// 7. The SAME header is likewise ignored without the dev flag:
+// 8. The SAME header is likewise ignored without the dev flag:
 //    no AI binding + header -> 'no_ai', never the mock.
 {
   const prodLike = { DB, TMDB_READ_TOKEN: 'mock-token' };
@@ -352,7 +380,7 @@ console.log('bootstrap data written (5 ratings + 2 notes)');
   console.log('override header ignored without IS_DEV_WORKER (503 no_ai, mock NOT engaged)');
 }
 
-// 8. Zero real AI calls across the whole mock flow.
+// 9. Zero real AI calls across the whole mock flow.
 assert.equal(aiCalls, 1, 'only the deliberate header-is-dead probe touched AI');
 console.log('AI calls total:', aiCalls, '(1 = the deliberate header-is-dead probe; mock flow = 0)');
 

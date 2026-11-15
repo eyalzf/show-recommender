@@ -87,6 +87,49 @@ export interface TmdbShowDetail extends TmdbSearchResult {
   seasons: { season_number: number; episode_count: number; air_date: string | null }[];
 }
 
+/** One raw cast entry from GET /tv/{id}/credits (billing `order` ascending). */
+export interface TmdbCastMember {
+  id: number;
+  name: string;
+  character: string;
+  profile_path: string | null;
+  order: number;
+}
+
+/** Resolved cast member for the detail view: actor, role, photo. */
+export interface CastMember {
+  tmdbId: number;
+  name: string;
+  character: string;
+  profilePath: string | null;
+}
+
+/**
+ * How many top-billed cast members the detail view shows. TMDB returns
+ * the full cast (often 30+); the rail shows the billed head only.
+ */
+export const MAX_CAST_MEMBERS = 12;
+
+/**
+ * Normalize raw credits into the display list: billing order, capped.
+ * Defensive about missing fields — a malformed entry is skipped, never
+ * fatal, because cast is display-only enrichment.
+ */
+export function toCastMembers(raw: TmdbCastMember[] | null | undefined): CastMember[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((m) => m && typeof m.id === 'number' && typeof m.name === 'string' && m.name.length > 0)
+    .slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .slice(0, MAX_CAST_MEMBERS)
+    .map((m) => ({
+      tmdbId: m.id,
+      name: m.name,
+      character: typeof m.character === 'string' ? m.character : '',
+      profilePath: m.profile_path ?? null,
+    }));
+}
+
 /** One canonical origin label per show (spec §4) — never a raw passthrough. */
 export interface ResolvedShow {
   tmdbId: number;
@@ -116,6 +159,8 @@ export interface ResolvedShow {
   episodeRunTime: number[] | null;
   /** Display-only providers; never a filter (spec §3). */
   providers: string[];
+  /** Top-billed cast (capped, see MAX_CAST_MEMBERS); [] when unavailable. */
+  cast: CastMember[];
 }
 
 function requireToken(c: Context<{ Bindings: Env }>): string {
@@ -296,12 +341,100 @@ export async function getWatchProviders(
   }
 }
 
+/**
+ * Top-billed cast for a show, display-only. Fail-soft like providers:
+ * any failure yields [] and the detail page simply omits the rail.
+ * Cast is factual metadata shown to the user only — it never enters
+ * any LLM input, so no terms-guardrail concern (see module header).
+ */
+export async function getShowCredits(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+): Promise<CastMember[]> {
+  try {
+    const data = await tmdbFetch<{ cast?: TmdbCastMember[] }>(c, `/tv/${tmdbId}/credits`, {
+      language: tmdbLanguage(uiLang),
+    });
+    return toCastMembers(data.cast);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Credits cache rows live in the same show_metadata_cache table as
+ * detail payloads, keyed by a `credits:<tag>` pseudo-language so they
+ * coexist with the per-language detail rows. Same 180-day TTL, same
+ * terms cap — no new table, no migration.
+ */
+export function creditsCacheLanguage(uiLang: string): string {
+  return `credits:${tmdbLanguage(uiLang)}`;
+}
+
+export async function getCachedCredits(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+): Promise<CastMember[] | null> {
+  const db = c.env.DB;
+  if (!db) return null;
+  try {
+    const row = await db
+      .prepare('SELECT payload_json, cached_at FROM show_metadata_cache WHERE tmdb_id = ? AND language = ?')
+      .bind(tmdbId, creditsCacheLanguage(uiLang))
+      .first<{ payload_json: string; cached_at: number }>();
+    if (!row) return null;
+    if (Date.now() - row.cached_at > TMDB_CACHE_TTL_MS) return null;
+    const parsed = JSON.parse(row.payload_json) as unknown;
+    return Array.isArray(parsed) ? (parsed as CastMember[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function putCachedCredits(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+  cast: CastMember[],
+): Promise<void> {
+  const db = c.env.DB;
+  if (!db) return;
+  try {
+    await db
+      .prepare(
+        `INSERT INTO show_metadata_cache (tmdb_id, language, payload_json, cached_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(tmdb_id, language) DO UPDATE SET payload_json = excluded.payload_json, cached_at = excluded.cached_at`,
+      )
+      .bind(tmdbId, creditsCacheLanguage(uiLang), JSON.stringify(cast), Date.now())
+      .run();
+  } catch {
+    // Cache writes are best-effort; a failure must not break the page.
+  }
+}
+
+/** Credits fetch with the read-through cache (empty results are not cached). */
+export async function getShowCreditsCached(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+): Promise<CastMember[]> {
+  const cached = await getCachedCredits(c, tmdbId, uiLang);
+  if (cached) return cached;
+  const cast = await getShowCredits(c, tmdbId, uiLang);
+  if (cast.length > 0) await putCachedCredits(c, tmdbId, uiLang, cast);
+  return cast;
+}
+
 /** Merge raw detail through the TMDB -> override chain. */
 export function resolveDetail(
   detail: TmdbShowDetail,
   override: OverrideRow | null,
   uiLang: string,
   providers: string[],
+  cast: CastMember[] = [],
 ): ResolvedShow {
   let title = detail.name;
   let overview = detail.overview;
@@ -336,6 +469,7 @@ export function resolveDetail(
     numberOfEpisodes: displayEpisodes(detail.seasons, detail.number_of_episodes),
     episodeRunTime: detail.episode_run_time,
     providers,
+    cast,
   };
 }
 
@@ -345,12 +479,13 @@ export async function getShow(
   tmdbId: number,
   uiLang: string,
 ): Promise<ResolvedShow> {
-  const [detail, override, providers] = await Promise.all([
+  const [detail, override, providers, cast] = await Promise.all([
     getShowDetailRaw(c, tmdbId, uiLang),
     readOverride(c, tmdbId),
     getWatchProviders(c, tmdbId),
+    getShowCreditsCached(c, tmdbId, uiLang),
   ]);
-  return resolveDetail(detail, override, uiLang, providers);
+  return resolveDetail(detail, override, uiLang, providers, cast);
 }
 
 /**

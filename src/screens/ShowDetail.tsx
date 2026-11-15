@@ -4,6 +4,8 @@ import type { ListItem, Profile, Rating, ShowDetail, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
 import { yearRangeLabel } from '../showMeta';
+import { Rail } from '../components/Rail';
+import { useNotify } from '../components/Notifications';
 
 interface Props {
   lang: UiLang;
@@ -22,46 +24,46 @@ interface Props {
  * lists (the Home screen reflects that on its next load).
  */
 export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
+  const { notify } = useNotify();
   const [show, setShow] = useState<ShowDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [rating, setRating] = useState<Rating>('liked');
   const [reason, setReason] = useState('');
-  const [saved, setSaved] = useState(false);
-  const [saveNotice, setSaveNotice] = useState<string | null>(null);
 
   useEffect(() => {
+    setLoadFailed(false);
     api
       .show(tmdbId, lang)
       .then((res) => setShow(res.show))
       .catch((err: unknown) => {
-        setError(
+        setLoadFailed(true);
+        notify(
           err instanceof ApiError && err.code === 'tmdb_not_configured'
             ? t(lang, 'tmdbMissing')
             : t(lang, 'searchError'),
+          { kind: 'error', sticky: true, key: 'show-error' },
         );
       });
-  }, [tmdbId, lang]);
+  }, [tmdbId, lang, notify]);
 
   const save = async () => {
     if (!show) return;
     try {
       await api.feedback(profile.id, tmdbId, rating, reason, show.title, show.originalLanguage);
-      setSaved(true);
-      setSaveNotice(null);
+      notify(t(lang, 'save'), { kind: 'success' });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setSaveNotice(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setSaveNotice(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
     }
   };
 
-  if (error) {
+  if (loadFailed) {
     return (
       <section>
         <button type="button" className="btn btn-ghost" onClick={onBack}>{t(lang, 'back')}</button>
-        <p className="error-note" role="alert">{error}</p>
       </section>
     );
   }
@@ -135,6 +137,32 @@ export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
         </div>
       </div>
 
+      {(show.cast ?? []).length > 0 ? (
+        <>
+          <h3>{t(lang, 'castTitle')}</h3>
+          <Rail lang={lang} label={t(lang, 'castTitle')}>
+            {(show.cast ?? []).map((m) => (
+              <article className="cast-card" key={m.tmdbId}>
+                {m.profilePath ? (
+                  <img
+                    className="cast-photo"
+                    src={`https://image.tmdb.org/t/p/w185${m.profilePath}`}
+                    alt=""
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="cast-photo-fallback" aria-hidden="true">
+                    {m.name.charAt(0)}
+                  </div>
+                )}
+                <div className="cast-name">{m.name}</div>
+                {m.character ? <div className="cast-character">{m.character}</div> : null}
+              </article>
+            ))}
+          </Rail>
+        </>
+      ) : null}
+
       <h3>{t(lang, 'rate')}</h3>
       <div className="rating-row" role="group" aria-label={t(lang, 'rate')}>
         {(['liked', 'disliked', 'dropped'] as Rating[]).map((r) => (
@@ -155,8 +183,6 @@ export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
       <button type="button" className="btn btn-primary" onClick={save}>
         {t(lang, 'saveFeedback')}
       </button>
-      {saved ? <p className="ok-note">{t(lang, 'save')}</p> : null}
-      {saveNotice ? <p className="notice" role="status">{saveNotice}</p> : null}
     </section>
   );
 }

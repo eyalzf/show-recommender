@@ -6,6 +6,7 @@ import { t } from '../i18n';
 import { RailCard } from '../components/ShowCard';
 import { Rail } from '../components/Rail';
 import { RatingDialog, RemoveDialog } from '../components/Dialogs';
+import { useNotify } from '../components/Notifications';
 
 interface Props {
   lang: UiLang;
@@ -19,6 +20,7 @@ interface Props {
  * the show from the list (spec §7); rating removes it from BOTH lists.
  */
 export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
+  const { notify, dismiss } = useNotify();
   const [casual, setCasual] = useState<ListItem[]>([]);
   const [deep, setDeep] = useState<ListItem[]>([]);
   const [stub, setStub] = useState(false);
@@ -29,7 +31,6 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [casualReason, setCasualReason] = useState<string | null>(null);
   const [deepReason, setDeepReason] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [rateTarget, setRateTarget] = useState<ListItem | null>(null);
   const [removeTarget, setRemoveTarget] = useState<ListItem | null>(null);
 
@@ -40,7 +41,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
       // first-ever generation after onboarding completes.
       setGenerating(true);
       setLoadFailed(false);
-      setNotice(null);
+      dismiss('lists-error');
       api
         .lists(profile.id, lang, forceRefresh)
         .then((res) => {
@@ -51,14 +52,20 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
           setUpdatedAt(res.updatedAt);
           setCasualReason(res.casualShortReason);
           setDeepReason(res.deepShortReason);
-          if (res.stale) setNotice(t(lang, 'listsStale'));
+          if (res.stale) notify(t(lang, 'listsStale'), { key: 'lists-stale' });
         })
         .catch((err: unknown) => {
           setLoadFailed(true);
-          setNotice(
+          notify(
             err instanceof ApiError && err.code === 'tmdb_not_configured'
               ? t(lang, 'tmdbMissing')
               : t(lang, 'engineFailed'),
+            {
+              kind: 'error',
+              sticky: true,
+              key: 'lists-error',
+              action: { label: t(lang, 'retry'), onClick: () => load(true) },
+            },
           );
         })
         .finally(() => {
@@ -66,7 +73,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
           setHasLoaded(true);
         });
     },
-    [profile.id, lang],
+    [profile.id, lang, notify, dismiss],
   );
 
   useEffect(() => {
@@ -84,9 +91,9 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
       await fn();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setNotice(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setNotice(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
     }
   };
@@ -145,7 +152,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
       {generating && items.length === 0 ? (
         renderBuilding()
       ) : items.length === 0 ? (
-        // On a failed load the error notice + retry above explains the
+        // On a failed load the error toast + retry action explains the
         // empty section; never show the generic short-list fallback.
         loadFailed ? null : (
           <p>{reason ?? t(lang, 'shortListReason')}</p>
@@ -181,16 +188,6 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
   return (
     <div>
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
-      {notice ? (
-        <p className="notice" role="status">
-          {notice}{' '}
-          {loadFailed ? (
-            <button type="button" className="btn btn-ghost" onClick={() => load(true)} disabled={generating}>
-              {t(lang, 'retry')}
-            </button>
-          ) : null}
-        </p>
-      ) : null}
       <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
       {renderList(t(lang, 'casualTitle'), 'Casual Top 10', casual, casualReason)}
       {renderList(t(lang, 'deepTitle'), 'Deep Focus Top 10', deep, deepReason)}
@@ -208,6 +205,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
         <RatingDialog
           lang={lang}
           title={rateTarget.title}
+          posterPath={rateTarget.posterPath}
           onSubmit={submitRating}
           onClose={() => setRateTarget(null)}
         />

@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { Profile, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
 import { ALL_LANGUAGES, ICON_PRESETS } from '../profileMeta';
 import { ShowPicker } from '../components/ShowPicker';
+import { useNotify } from '../components/Notifications';
 
 interface Props {
   lang: UiLang;
@@ -22,6 +23,7 @@ interface Props {
  * show-picking step (the gate lives in App; this screen is the flow).
  */
 export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Props) {
+  const { notify } = useNotify();
   const [step, setStep] = useState<1 | 2>(profile ? 2 : 1);
   const [workingProfile, setWorkingProfile] = useState<Profile | null>(profile);
   const [name, setName] = useState(profile?.name ?? '');
@@ -30,8 +32,19 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
     profile?.iconKind === 'icon' ? profile.iconRef : null,
   );
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // Resuming an incomplete profile is a one-time notice, delivered
+  // through the single notification system on mount.
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (profile && !resumedRef.current) {
+      resumedRef.current = true;
+      notify(t(lang, 'onboardingResume'));
+    }
+    // Fire once per mount, in the language active at entry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggleLanguage = (code: string) => {
     setLanguages((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
@@ -40,7 +53,6 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
   const submitDetails = async () => {
     if (!name.trim()) return;
     setSaving(true);
-    setError(null);
     try {
       const iconKind = icon ? 'icon' : 'initials';
       let saved: Profile;
@@ -66,9 +78,9 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
       setStep(2);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setError(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setError(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
     } finally {
       setSaving(false);
@@ -87,8 +99,6 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
           {t(lang, 'onboardingShows')}
         </li>
       </ol>
-
-      {profile ? <p className="notice" role="status">{t(lang, 'onboardingResume')}</p> : null}
 
       {step === 1 ? (
         <>
@@ -158,7 +168,6 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
             </div>
           </div>
 
-          {error ? <p className="error-note" role="alert">{error}</p> : null}
           <div className="dialog-actions">
             <button type="button" className="btn btn-ghost" onClick={onExit}>
               {t(lang, 'back')}

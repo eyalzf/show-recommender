@@ -3,6 +3,7 @@ import { api } from '../api';
 import type { Profile, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
+import { useNotify } from '../components/Notifications';
 
 interface Props {
   lang: UiLang;
@@ -15,6 +16,7 @@ interface Props {
  * Trust is learned implicitly — no stars, sliders, or tiers anywhere.
  */
 export function Recommendations({ lang, profile }: Props) {
+  const { notify } = useNotify();
   const [kind, setKind] = useState<'personal' | 'generic'>('personal');
   const [showTitle, setShowTitle] = useState('');
   const [names, setNames] = useState<string[]>(['']);
@@ -27,7 +29,6 @@ export function Recommendations({ lang, profile }: Props) {
     { name: string; recommended: number; liked: number; disliked: number; dropped: number }[]
   >([]);
   const [stub, setStub] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
 
   const load = () => {
     api.recommendations(profile.id).then((res) => {
@@ -50,13 +51,12 @@ export function Recommendations({ lang, profile }: Props) {
       setShowTitle('');
       setNames(['']);
       setNote('');
-      setNotice(null);
       load();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setNotice(t(lang, 'notSaved'));
+        notify(t(lang, 'notSaved'), { kind: 'error' });
       } else {
-        setNotice(t(lang, 'searchError'));
+        notify(t(lang, 'searchError'), { kind: 'error' });
       }
     }
   };
@@ -65,7 +65,6 @@ export function Recommendations({ lang, profile }: Props) {
     <section>
       <h2>{t(lang, 'recsTitle')}</h2>
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
-      {notice ? <p className="notice" role="status">{notice}</p> : null}
 
       <h3>{t(lang, 'recsAdd')}</h3>
       <div className="rating-row" role="group">
