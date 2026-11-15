@@ -69,6 +69,57 @@ export interface ProfileContext {
   externalRecs: ExternalRecRow[];
 }
 
+/**
+ * Bootstrap (onboarding) progress: 5 rated shows including at least one
+ * dislike/drop, plus one free-text taste note (spec §7, settled 2026-11-15).
+ * Latest rating per show wins, so re-rating a show moves it between the
+ * liked and negative buckets instead of double-counting.
+ */
+export interface BootstrapStatus {
+  rated: number;
+  negatives: number;
+  hasNote: boolean;
+  complete: boolean;
+}
+
+export function bootstrapStatusFromFeedback(feedback: FeedbackRow[]): BootstrapStatus {
+  const latest = new Map<number, string>();
+  let hasNote = false;
+  for (const f of feedback) {
+    if (f.kind === 'note') {
+      if (f.text.trim().length > 0) hasNote = true;
+    } else if (f.tmdbId != null && f.rating) {
+      latest.set(f.tmdbId, f.rating);
+    }
+  }
+  const negatives = [...latest.values()].filter((r) => r !== 'liked').length;
+  const rated = latest.size;
+  return { rated, negatives, hasNote, complete: rated >= 5 && negatives >= 1 && hasNote };
+}
+
+export async function loadBootstrapStatus(
+  db: D1Database,
+  profileId: string,
+): Promise<BootstrapStatus> {
+  const res = await db
+    .prepare(
+      'SELECT kind, tmdb_id, rating, text FROM feedback_log WHERE profile_id = ? ORDER BY created_at ASC',
+    )
+    .bind(profileId)
+    .all<Record<string, unknown>>();
+  const feedback: FeedbackRow[] = (res.results ?? []).map((r, i) => ({
+    id: String(i),
+    kind: r['kind'] === 'note' ? 'note' : 'show',
+    tmdbId: r['tmdb_id'] == null ? null : Number(r['tmdb_id']),
+    showTitle: null,
+    rating: r['rating'] == null ? null : String(r['rating']),
+    text: String(r['text'] ?? ''),
+    originalLanguage: null,
+    createdAt: 0,
+  }));
+  return bootstrapStatusFromFeedback(feedback);
+}
+
 function parseLanguages(json: string | null): string[] {
   try {
     const parsed: unknown = JSON.parse(json ?? '[]');

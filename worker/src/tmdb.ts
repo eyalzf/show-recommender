@@ -217,19 +217,22 @@ export async function getShowRecommendations(
   return (data.results ?? []).filter((r) => !isBlockedId(r.id));
 }
 
-// Genre id -> name map, cached per isolate (the list barely changes).
-let genreCache: { at: number; map: Map<number, string> } | null = null;
+// Genre id -> name map, cached per isolate per language (the list barely
+// changes, but the names are localized, so each language gets its own entry).
+const genreCaches = new Map<string, { at: number; map: Map<number, string> }>();
 
 export async function getGenreMap(
   c: Context<{ Bindings: Env }>,
   uiLang: string,
 ): Promise<Map<number, string>> {
-  if (genreCache && Date.now() - genreCache.at < 24 * 60 * 60 * 1000) return genreCache.map;
+  const tag = tmdbLanguage(uiLang);
+  const hit = genreCaches.get(tag);
+  if (hit && Date.now() - hit.at < 24 * 60 * 60 * 1000) return hit.map;
   const data = await tmdbFetch<{ genres: { id: number; name: string }[] }>(c, '/genre/tv/list', {
-    language: tmdbLanguage(uiLang),
+    language: tag,
   });
   const map = new Map((data.genres ?? []).map((g) => [g.id, g.name]));
-  genreCache = { at: Date.now(), map };
+  genreCaches.set(tag, { at: Date.now(), map });
   return map;
 }
 

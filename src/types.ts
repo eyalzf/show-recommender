@@ -2,12 +2,20 @@ export type UiLang = 'en' | 'he';
 export type Rating = 'liked' | 'disliked' | 'dropped';
 export type ScreenName =
   | 'picker'
-  | 'bootstrap'
+  | 'onboarding'
   | 'home'
   | 'detail'
   | 'taste'
   | 'recommendations'
   | 'adhoc';
+
+/** Bootstrap (onboarding) progress, computed server-side from the feedback log. */
+export interface BootstrapStatus {
+  rated: number;
+  negatives: number;
+  hasNote: boolean;
+  complete: boolean;
+}
 
 export interface Profile {
   id: string;
@@ -18,6 +26,8 @@ export interface Profile {
   uiLanguage: string;
   noteCount?: number;
   listsUpdatedAt?: string | null;
+  /** Absent in stub/demo mode — treated as complete (no gate). */
+  bootstrap?: BootstrapStatus;
 }
 
 export interface SearchHit {
@@ -29,6 +39,19 @@ export interface SearchHit {
   posterPath: string | null;
   firstAirDate: string;
   originCountry: string[];
+  genres: string[];
+  voteAverage: number;
+  voteCount: number;
+}
+
+/** One show-feedback row, newest first (GET /api/feedback). */
+export interface ShowFeedbackEntry {
+  tmdbId: number | null;
+  showTitle: string | null;
+  rating: string | null;
+  reason: string;
+  originalLanguage: string | null;
+  createdAt: number;
 }
 
 export interface ListItem {

@@ -3,21 +3,13 @@ import { api } from '../api';
 import type { Profile, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
+import { ALL_LANGUAGES } from '../profileMeta';
 
 interface Props {
   lang: UiLang;
   profile: Profile;
   onProfileChanged?: (profile: Profile) => void;
 }
-
-const ALL_LANGUAGES = [
-  { code: 'he', labelEn: 'Hebrew', labelHe: 'עברית' },
-  { code: 'en', labelEn: 'English', labelHe: 'אנגלית' },
-  { code: 'es', labelEn: 'Spanish', labelHe: 'ספרדית' },
-  { code: 'ko', labelEn: 'Korean', labelHe: 'קוריאנית' },
-  { code: 'fr', labelEn: 'French', labelHe: 'צרפתית' },
-  { code: 'de', labelEn: 'German', labelHe: 'גרמנית' },
-];
 
 /** Taste profile: living summary, contradiction flow, hard filter. */
 export function TasteProfile({ lang, profile, onProfileChanged }: Props) {

@@ -1,5 +1,5 @@
 import { ApiError } from './types';
-import type { ListItem, Profile, SearchHit, ShowDetail, UiLang } from './types';
+import type { ListItem, Profile, SearchHit, ShowDetail, ShowFeedbackEntry, UiLang } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -43,6 +43,16 @@ export const api = {
 
   search: (q: string, lang: UiLang) =>
     req<{ results: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}&lang=${lang}`),
+
+  quickPicks: (profileId: string, lang: UiLang) =>
+    req<{ results: SearchHit[] }>(
+      `/api/quick-picks?profileId=${encodeURIComponent(profileId)}&lang=${lang}`,
+    ),
+
+  feedbackList: (profileId: string) =>
+    req<{ feedback: ShowFeedbackEntry[] }>(
+      `/api/feedback?profileId=${encodeURIComponent(profileId)}`,
+    ),
 
   show: (tmdbId: number, lang: UiLang) =>
     req<{ show: ShowDetail }>(`/api/shows/${tmdbId}?lang=${lang}`),

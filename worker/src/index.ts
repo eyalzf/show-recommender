@@ -11,14 +11,18 @@ import {
 import {
   TmdbApiError,
   TmdbNotConfiguredError,
+  discoverShows,
+  getGenreMap,
   getShow,
   searchShows,
+  type TmdbSearchResult,
 } from './tmdb';
 import {
   buildConsolidationPrompt,
   getLlmProvider,
 } from './llm';
 import {
+  bootstrapStatusFromFeedback,
   createProfile,
   ensureAccount,
   insertDeny,
@@ -26,6 +30,7 @@ import {
   insertFeedback,
   insertNote,
   invalidateLists,
+  loadBootstrapStatus,
   loadProfile,
   loadProfileContext,
   loadStoredLists,
@@ -33,6 +38,7 @@ import {
   saveStoredList,
   saveTasteSummary,
   updateProfile,
+  type BootstrapStatus,
 } from './db';
 import { generateAdhocPick, generateLists, type GeneratedLists } from './engine';
 import { loadKnownNames, recomputePeopleScores } from './trust';
@@ -111,33 +117,87 @@ app.get('/api/health', (c) => {
 // Real TMDB route. Errors cleanly (503 tmdb_not_configured) until the
 // TMDB_READ_TOKEN secret is set. No stub fallback: search results must be
 // real or explicitly absent, never invented.
+//
+// Rows are "rich": poster, genres (mapped from genre_ids — no detail call
+// per keystroke), vote average/count, year, origin. Status/season counts
+// are NOT in search payloads; the detail view carries them.
+
+/** Map a TMDB search/discover result to the picker's rich row shape. */
+function toRichRow(r: TmdbSearchResult, genreMap: Map<number, string>) {
+  return {
+    tmdbId: r.id,
+    title: r.name,
+    originalTitle: r.original_name,
+    originalLanguage: r.original_language,
+    overview: r.overview,
+    posterPath: r.poster_path,
+    firstAirDate: r.first_air_date,
+    originCountry: r.origin_country,
+    genres: r.genre_ids.map((id) => genreMap.get(id)).filter((g): g is string => Boolean(g)),
+    voteAverage: r.vote_average,
+    voteCount: r.vote_count,
+  };
+}
+
+async function excludedOverrideIds(c: Ctx): Promise<Set<number>> {
+  if (!hasDb(c)) return new Set();
+  const excluded = await c.env.DB!.prepare(
+    'SELECT tmdb_id FROM curated_overrides WHERE excluded = 1',
+  ).all<{ tmdb_id: number }>();
+  return new Set((excluded.results ?? []).map((r) => r.tmdb_id));
+}
 
 app.get('/api/search', async (c: Ctx) => {
   const q = (c.req.query('q') ?? '').trim();
   const lang = c.req.query('lang') ?? 'en';
   if (q.length < 2) return c.json({ results: [] });
-  let results = await searchShows(c, q, lang);
-  if (hasDb(c)) {
-    // Drop override-excluded duplicates (the DB flag is the mechanism;
-    // the hardcoded blocklist in tmdb.ts is the fallback).
-    const excluded = await c.env.DB!.prepare(
-      'SELECT tmdb_id FROM curated_overrides WHERE excluded = 1',
-    ).all<{ tmdb_id: number }>();
-    const excludedIds = new Set((excluded.results ?? []).map((r) => r.tmdb_id));
-    results = results.filter((r) => !excludedIds.has(r.id));
-  }
+  const [results, genreMap, excludedIds] = await Promise.all([
+    searchShows(c, q, lang),
+    getGenreMap(c, lang),
+    excludedOverrideIds(c),
+  ]);
   return c.json({
-    results: results.map((r) => ({
-      tmdbId: r.id,
-      title: r.name,
-      originalTitle: r.original_name,
-      originalLanguage: r.original_language,
-      overview: r.overview,
-      posterPath: r.poster_path,
-      firstAirDate: r.first_air_date,
-      originCountry: r.origin_country,
-    })),
+    results: results
+      .filter((r) => !excludedIds.has(r.id))
+      .map((r) => toRichRow(r, genreMap)),
   });
+});
+
+// ---------------------------------------------------------------- quick picks
+// Highly popular shows of ALL TIME (not only recent): a blend of TMDB
+// discover sorted by popularity and by vote average, both with a
+// vote-count floor so the list is stable classics + acclaimed shows, not
+// this week's trending. Filtered to the profile's hard language filter
+// and stripped of rated / denied / override-excluded shows. No detail
+// calls: rows come straight from the discover payloads.
+
+const QUICK_PICKS_LIMIT = 16;
+
+app.get('/api/quick-picks', async (c: Ctx) => {
+  const profileId = c.req.query('profileId') ?? DEV_PROFILE_ID;
+  await requireProfileAccess(c, profileId);
+  const lang = c.req.query('lang') ?? 'en';
+  const ctx = hasDb(c) ? await loadProfileContext(c.env.DB!, profileId, lang) : null;
+  const languages = ctx?.profile.languages ?? [];
+  const [popular, acclaimed, genreMap] = await Promise.all([
+    discoverShows(c, lang, { languages, sortBy: 'popularity.desc', minVoteCount: 300, page: 1 }),
+    discoverShows(c, lang, { languages, sortBy: 'vote_average.desc', minVoteCount: 1000, page: 1 }),
+    getGenreMap(c, lang),
+  ]);
+  const seen = new Set<number>();
+  const picks: TmdbSearchResult[] = [];
+  // Interleave the two pools so neither popularity nor acclaim dominates.
+  for (let i = 0; i < Math.max(popular.length, acclaimed.length) && picks.length < QUICK_PICKS_LIMIT; i++) {
+    for (const pool of [popular, acclaimed]) {
+      const r = pool[i];
+      if (!r || seen.has(r.id) || !r.poster_path) continue;
+      seen.add(r.id);
+      if (ctx?.ratedIds.has(r.id) || ctx?.denyIds.has(r.id) || ctx?.excludedIds.has(r.id)) continue;
+      picks.push(r);
+      if (picks.length >= QUICK_PICKS_LIMIT) break;
+    }
+  }
+  return c.json({ results: picks.map((r) => toRichRow(r, genreMap)) });
 });
 
 // ---------------------------------------------------------------- shows
@@ -154,14 +214,17 @@ app.get('/api/shows/:id', async (c: Ctx) => {
 
 // ---------------------------------------------------------------- profiles
 
-function profileView(p: {
-  id: string;
-  name: string;
-  iconKind: string;
-  iconRef: string | null;
-  languages: string[];
-  uiLanguage: string;
-}) {
+function profileView(
+  p: {
+    id: string;
+    name: string;
+    iconKind: string;
+    iconRef: string | null;
+    languages: string[];
+    uiLanguage: string;
+  },
+  bootstrap?: BootstrapStatus,
+) {
   return {
     id: p.id,
     name: p.name,
@@ -169,6 +232,7 @@ function profileView(p: {
     iconRef: p.iconRef,
     languages: p.languages,
     uiLanguage: p.uiLanguage,
+    bootstrap,
   };
 }
 
@@ -182,18 +246,24 @@ app.get('/api/profiles', async (c: Ctx) => {
   )
     .bind(auth.accountId)
     .all();
-  return c.json({
-    profiles: (rows.results as unknown as Record<string, unknown>[]).map((r) =>
-      profileView({
-        id: String(r['id']),
-        name: String(r['name']),
-        iconKind: String(r['icon_kind']),
-        iconRef: r['icon_ref'] == null ? null : String(r['icon_ref']),
-        languages: JSON.parse(String(r['languages_json'] ?? '[]')) as string[],
-        uiLanguage: String(r['ui_language']),
-      }),
-    ),
-  });
+  const profiles = await Promise.all(
+    (rows.results as unknown as Record<string, unknown>[]).map(async (r) => {
+      const id = String(r['id']);
+      const bootstrap = await loadBootstrapStatus(c.env.DB!, id);
+      return profileView(
+        {
+          id,
+          name: String(r['name']),
+          iconKind: String(r['icon_kind']),
+          iconRef: r['icon_ref'] == null ? null : String(r['icon_ref']),
+          languages: JSON.parse(String(r['languages_json'] ?? '[]')) as string[],
+          uiLanguage: String(r['ui_language']),
+        },
+        bootstrap,
+      );
+    }),
+  );
+  return c.json({ profiles });
 });
 
 app.post('/api/profiles', async (c: Ctx) => {
@@ -225,7 +295,8 @@ app.post('/api/profiles', async (c: Ctx) => {
     kind,
     kind === 'initials' ? null : (iconRef ?? null),
   );
-  return c.json({ profile: profileView(profile) }, 201);
+  const bootstrap = await loadBootstrapStatus(c.env.DB!, profile.id);
+  return c.json({ profile: profileView(profile, bootstrap) }, 201);
 });
 
 app.patch('/api/profiles/:id', async (c: Ctx) => {
@@ -256,7 +327,8 @@ app.patch('/api/profiles/:id', async (c: Ctx) => {
   if (patch.languages && JSON.stringify(patch.languages) !== JSON.stringify(before.languages)) {
     await invalidateLists(c.env.DB!, profileId);
   }
-  return c.json({ profile: profileView(updated) });
+  const bootstrap = await loadBootstrapStatus(c.env.DB!, profileId);
+  return c.json({ profile: profileView(updated, bootstrap) });
 });
 
 // Profile image upload -> R2. The object key becomes icon_ref.
@@ -334,6 +406,22 @@ async function listsResponse(
   const ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) {
     return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
+  }
+  // Defense in depth for the onboarding gate (the frontend enforces it in
+  // the flow): a profile that has not completed the bootstrap minimum gets
+  // empty lists, never a generation from an empty taste signal.
+  if (!bootstrapStatusFromFeedback(ctx.feedback).complete) {
+    return {
+      stub: false,
+      stale: false,
+      profileId,
+      updatedAt: null,
+      casual: [],
+      deep: [],
+      shortReason: null,
+      casualShortReason: null,
+      deepShortReason: null,
+    };
   }
   let generated: GeneratedLists;
   try {
@@ -413,6 +501,30 @@ app.post('/api/lists/refresh', async (c: Ctx) => {
 // Rating a show removes it from both lists (spec §7, build rule 13) —
 // the frontend applies that immediately; the server records the
 // feedback, recomputes people trust, and invalidates the lists.
+
+// Show-feedback history, newest first. Lets the picker mark already-rated
+// shows and lets onboarding resume with its real progress.
+app.get('/api/feedback', async (c: Ctx) => {
+  const profileId = c.req.query('profileId') ?? DEV_PROFILE_ID;
+  await requireProfileAccess(c, profileId);
+  if (!hasDb(c)) {
+    return c.json({ feedback: [] });
+  }
+  const ctx = await loadProfileContext(c.env.DB!, profileId, 'en');
+  if (!ctx) {
+    return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
+  }
+  return c.json({
+    feedback: ctx.showFeedback.map((f) => ({
+      tmdbId: f.tmdbId,
+      showTitle: f.showTitle,
+      rating: f.rating,
+      reason: f.text,
+      originalLanguage: f.originalLanguage,
+      createdAt: f.createdAt,
+    })),
+  });
+});
 
 app.post('/api/feedback', async (c: Ctx) => {
   const denied = dbRequired(c);
@@ -526,7 +638,7 @@ app.get('/api/taste', async (c: Ctx) => {
               : `Your notes praise ${conflict.languageName}, but it is not in this profile's language filter.`,
         }
       : null,
-    profile: profileView(ctx.profile),
+    profile: profileView(ctx.profile, bootstrapStatusFromFeedback(ctx.feedback)),
   });
 });
 

@@ -3,28 +3,36 @@ import { api } from './api';
 import type { Profile, ScreenName, UiLang } from './types';
 import { detectLang, t } from './i18n';
 import { ProfilePicker } from './screens/ProfilePicker';
-import { Bootstrap } from './screens/Bootstrap';
+import { Onboarding } from './screens/Onboarding';
 import { Home } from './screens/Home';
 import { ShowDetail } from './screens/ShowDetail';
 import { TasteProfile } from './screens/TasteProfile';
 import { Recommendations } from './screens/Recommendations';
 import { AdHoc } from './screens/AdHoc';
+import { ShowPicker } from './components/ShowPicker';
 
-const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navBootstrap' | 'navTaste' | 'navRecs' | 'navAdhoc' }[] = [
+const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navTaste' | 'navRecs' | 'navAdhoc' }[] = [
   { screen: 'home', labelKey: 'navHome' },
-  { screen: 'bootstrap', labelKey: 'navBootstrap' },
   { screen: 'taste', labelKey: 'navTaste' },
   { screen: 'recommendations', labelKey: 'navRecs' },
   { screen: 'adhoc', labelKey: 'navAdhoc' },
 ];
+
+/** A profile gates to onboarding until the bootstrap minimum is complete. */
+function isIncomplete(p: Profile): boolean {
+  return Boolean(p.bootstrap && !p.bootstrap.complete);
+}
 
 export function App() {
   const [lang, setLang] = useState<UiLang>(() => detectLang());
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profilesStub, setProfilesStub] = useState(false);
   const [activeProfile, setActiveProfile] = useState<Profile | null>(null);
+  const [onboardingProfile, setOnboardingProfile] = useState<Profile | null>(null);
   const [screen, setScreen] = useState<ScreenName>('picker');
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [addWatchedOpen, setAddWatchedOpen] = useState(false);
+  const [homeKey, setHomeKey] = useState(0);
 
   // Bilingual by design (spec §8): default from the browser, switchable,
   // layout mirrors fully in RTL.
@@ -35,17 +43,21 @@ export function App() {
   }, [lang]);
 
   useEffect(() => {
-    loadProfiles();
+    void loadProfiles();
   }, []);
 
-  const loadProfiles = () => {
-    api
+  const loadProfiles = (): Promise<Profile[]> => {
+    return api
       .profiles()
       .then((res) => {
         setProfiles(res.profiles);
         setProfilesStub(Boolean(res.stub));
+        return res.profiles;
       })
-      .catch(() => setProfiles([]));
+      .catch(() => {
+        setProfiles([]);
+        return [];
+      });
   };
 
   const handleProfileChanged = (updated: Profile) => {
@@ -58,11 +70,46 @@ export function App() {
     setScreen('detail');
   };
 
-  const switchProfile = (p: Profile) => {
-    // Switching re-scopes the entire app (spec §2): lists, taste, and
-    // history change together. Nothing leaks between profiles.
+  /**
+   * The onboarding gate: entering a profile that has not completed the
+   * bootstrap minimum resumes the creation flow instead of the main
+   * screen. The main nav and switcher stay hidden until it completes.
+   */
+  const enterProfile = (p: Profile) => {
+    setDetailId(null);
+    if (isIncomplete(p)) {
+      setActiveProfile(null);
+      setOnboardingProfile(p);
+      setScreen('onboarding');
+      return;
+    }
+    setOnboardingProfile(null);
     setActiveProfile(p);
     setScreen('home');
+  };
+
+  const exitToPicker = () => {
+    setActiveProfile(null);
+    setOnboardingProfile(null);
+    setDetailId(null);
+    setScreen('picker');
+    void loadProfiles();
+  };
+
+  const handleOnboardingDone = (profile: Profile) => {
+    void loadProfiles().then((fresh) => {
+      const updated = fresh.find((p) => p.id === profile.id) ?? profile;
+      setOnboardingProfile(null);
+      setActiveProfile(updated);
+      setScreen('home');
+    });
+  };
+
+  const closeAddWatched = () => {
+    setAddWatchedOpen(false);
+    // Home remounts and reloads its lists (cheap when stored; a fresh
+    // generation when the new ratings invalidated them).
+    setHomeKey((k) => k + 1);
   };
 
   return (
@@ -79,7 +126,7 @@ export function App() {
                 value={activeProfile.id}
                 onChange={(e) => {
                   const p = profiles.find((x) => x.id === e.target.value);
-                  if (p) switchProfile(p);
+                  if (p) enterProfile(p);
                 }}
                 aria-label={t(lang, 'whoWatching')}
               >
@@ -114,38 +161,86 @@ export function App() {
             <button
               key={n.screen}
               type="button"
-              className={screen === n.screen ? 'btn btn-primary' : 'btn'}
+              className={screen === n.screen || (n.screen === 'home' && screen === 'detail') ? 'btn btn-primary' : 'btn'}
               onClick={() => setScreen(n.screen)}
             >
               {t(lang, n.labelKey)}
             </button>
           ))}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setAddWatchedOpen(true)}
+          >
+            + {t(lang, 'navAddWatched')}
+          </button>
         </nav>
       ) : null}
 
       <main>
-        {screen === 'picker' || !activeProfile ? (
+        {screen === 'picker' || (!activeProfile && screen !== 'onboarding') ? (
           <ProfilePicker
             lang={lang}
             profiles={profiles}
             stub={profilesStub}
-            onSelect={switchProfile}
-            onProfilesChanged={loadProfiles}
+            onSelect={enterProfile}
+            onCreateNew={() => {
+              setOnboardingProfile(null);
+              setScreen('onboarding');
+            }}
           />
-        ) : screen === 'home' ? (
-          <Home lang={lang} profile={activeProfile} onOpenShow={openShow} onAdhoc={() => setScreen('adhoc')} />
-        ) : screen === 'bootstrap' ? (
-          <Bootstrap lang={lang} profile={activeProfile} onDone={() => setScreen('home')} />
-        ) : screen === 'detail' && detailId != null ? (
+        ) : screen === 'onboarding' ? (
+          <Onboarding
+            lang={lang}
+            onLangChange={setLang}
+            profile={onboardingProfile}
+            onDone={handleOnboardingDone}
+            onExit={exitToPicker}
+          />
+        ) : screen === 'home' && activeProfile ? (
+          <Home
+            key={homeKey}
+            lang={lang}
+            profile={activeProfile}
+            onOpenShow={openShow}
+            onAdhoc={() => setScreen('adhoc')}
+          />
+        ) : screen === 'detail' && detailId != null && activeProfile ? (
           <ShowDetail lang={lang} profile={activeProfile} tmdbId={detailId} onBack={() => setScreen('home')} />
-        ) : screen === 'taste' ? (
+        ) : screen === 'taste' && activeProfile ? (
           <TasteProfile lang={lang} profile={activeProfile} onProfileChanged={handleProfileChanged} />
-        ) : screen === 'recommendations' ? (
+        ) : screen === 'recommendations' && activeProfile ? (
           <Recommendations lang={lang} profile={activeProfile} />
-        ) : (
+        ) : activeProfile ? (
           <AdHoc lang={lang} profile={activeProfile} onOpenShow={openShow} />
+        ) : (
+          <ProfilePicker
+            lang={lang}
+            profiles={profiles}
+            stub={profilesStub}
+            onSelect={enterProfile}
+            onCreateNew={() => {
+              setOnboardingProfile(null);
+              setScreen('onboarding');
+            }}
+          />
         )}
       </main>
+
+      {addWatchedOpen && activeProfile ? (
+        <div className="dialog-backdrop" onClick={closeAddWatched}>
+          <div
+            className="dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t(lang, 'addWatchedTitle')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>{t(lang, 'addWatchedTitle')}</h2>
+            <ShowPicker lang={lang} profile={activeProfile} mode="add" onClose={closeAddWatched} />
+          </div>
+        </div>
+      ) : null}
 
       <footer className="footer">
         <a href="https://www.themoviedb.org/" target="_blank" rel="noreferrer">
