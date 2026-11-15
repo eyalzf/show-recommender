@@ -352,6 +352,41 @@ export function mergeRankPasses(first: RankedEntry[], second: RankedEntry[]): Ra
   return scored.map((s) => s.entry);
 }
 
+// ---------------------------------------------------------------- anchor assignment
+
+/**
+ * Minimum shared genres for a genre-overlap anchor: a single shared
+ * genre (usually just "Comedy") is too weak to claim similarity — it
+ * made "The Office" the anchor for cartoons and crime dramas alike.
+ * Candidates sourced by TMDB recommendations keep their sourcing show
+ * as anchor regardless (that link is real retrieval provenance); this
+ * threshold applies only to the post-hoc overlap fallback. Below the
+ * threshold the candidate has no anchor and its rationale cites
+ * genres/year only.
+ */
+export const MIN_ANCHOR_GENRE_OVERLAP = 2;
+
+/**
+ * Index of the liked show with the greatest genre overlap with the
+ * candidate (ties keep the earliest = most recently liked), or -1 when
+ * no liked show shares at least MIN_ANCHOR_GENRE_OVERLAP genres.
+ */
+export function bestGenreOverlapAnchor(
+  candidateGenreIds: number[],
+  likedGenreIdSets: number[][],
+): number {
+  let best = -1;
+  let bestOverlap = 0;
+  for (let i = 0; i < likedGenreIdSets.length; i++) {
+    const overlap = candidateGenreIds.filter((id) => likedGenreIdSets[i].includes(id)).length;
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      best = i;
+    }
+  }
+  return bestOverlap >= MIN_ANCHOR_GENRE_OVERLAP ? best : -1;
+}
+
 // ---------------------------------------------------------------- grounded rationales
 
 /**

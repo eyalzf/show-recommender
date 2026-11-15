@@ -17,6 +17,7 @@ import {
 import { buildAdhocRationalePrompt, buildRankPrompt, buildRemovalCheckPrompt, getLlmProvider } from './llm';
 import { candidateEmbedText, embedTexts } from './embeddings';
 import {
+  bestGenreOverlapAnchor,
   buildShortTermTasteText,
   calibrationTargetFromLiked,
   deterministicRerank,
@@ -462,9 +463,10 @@ async function loadShowMeta(
 /**
  * Assign each candidate its retrieval anchor: the sourcing liked show
  * when TMDB recommendations brought it in, else the liked show with the
- * greatest genre overlap (ties keep the most recently liked). The
+ * greatest genre overlap — at least MIN_ANCHOR_GENRE_OVERLAP shared
+ * genres (a single shared genre is too weak to claim similarity). The
  * anchor title is what grounded rationales cite; null when no liked
- * show overlaps at all (the template rationale then cites genres/year).
+ * show qualifies (the template rationale then cites genres/year).
  */
 function assignAnchors(candidates: Candidate[], likedMeta: ShowMeta[], ctx: ProfileContext): void {
   const titleById = new Map<number, string>();
@@ -474,24 +476,17 @@ function assignAnchors(candidates: Candidate[], likedMeta: ShowMeta[], ctx: Prof
       titleById.set(f.tmdbId, f.showTitle);
     }
   }
+  const likedGenreSets = likedMeta.map((m) => m.genreIds);
   for (const cand of candidates) {
     if (cand.anchorIds.length > 0) {
       cand.anchorTmdbId = cand.anchorIds[0];
       cand.anchorTitle = titleById.get(cand.anchorIds[0]) ?? null;
       continue;
     }
-    let best: ShowMeta | null = null;
-    let bestOverlap = 0;
-    for (const meta of likedMeta) {
-      const overlap = cand.genreIds.filter((id) => meta.genreIds.includes(id)).length;
-      if (overlap > bestOverlap) {
-        bestOverlap = overlap;
-        best = meta;
-      }
-    }
-    if (best && bestOverlap > 0) {
-      cand.anchorTmdbId = best.tmdbId;
-      cand.anchorTitle = best.title;
+    const best = bestGenreOverlapAnchor(cand.genreIds, likedGenreSets);
+    if (best >= 0) {
+      cand.anchorTmdbId = likedMeta[best].tmdbId;
+      cand.anchorTitle = likedMeta[best].title;
     }
   }
 }

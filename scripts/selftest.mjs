@@ -404,6 +404,14 @@ assert.deepEqual(m3.map((x) => x.tmdbId), [2, 1, 3]); // 3 penalized (one pass o
 assert.equal(m3[0].rationale, 'b2'); // 2 ranked better in pass 2
 assert.deepEqual(rerank.mergeRankPasses([], []), []);
 
+// bestGenreOverlapAnchor: >= 2 shared genres, ties keep earliest
+assert.equal(rerank.bestGenreOverlapAnchor([16, 35], [[35], [18, 35]]), -1); // single-genre overlap is too weak
+assert.equal(rerank.bestGenreOverlapAnchor([16, 35], [[16, 35], [35]]), 0);
+assert.equal(rerank.bestGenreOverlapAnchor([80, 18, 9648], [[18], [80, 18], [80, 18, 9648]]), 2);
+assert.equal(rerank.bestGenreOverlapAnchor([80, 18], [[80, 18], [80, 18, 9648]]), 0); // tie -> earliest
+assert.equal(rerank.bestGenreOverlapAnchor([], [[35]]), -1);
+assert.equal(rerank.bestGenreOverlapAnchor([35], []), -1);
+
 // groundRationale / templateRationale
 assert.equal(
   rerank.groundRationale('Loved it because Seinfeld fans enjoy this.', 'Seinfeld', ['Comedy'], '1994', 'en'),
