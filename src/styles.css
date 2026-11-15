@@ -106,6 +106,13 @@ body {
 .profile-menu-item:hover { background: #1d222d; }
 .profile-menu-item.is-active { background: rgba(240, 56, 61, 0.14); }
 .profile-icon-sm { width: 28px !important; height: 28px !important; font-size: 0.85rem !important; flex-shrink: 0; }
+/* Plain profile icon: no disc background. Used by the header switcher
+   (button + menu), where the red gradient disc read as a ball around
+   the icon. The picker cards keep the disc as the avatar presentation. */
+.profile-icon-plain {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; color: var(--text);
+}
 
 .nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
 
@@ -265,7 +272,7 @@ input[type="file"] { font-size: 0.9rem; }
    row starts at the inline-start edge and mirrors in RTL with no
    separate rules; scroll-snap is proximity so it never fights RTL. */
 
-.rail { position: relative; margin-top: 16px; }
+.rail { margin-top: 16px; }
 .rail-viewport {
   overflow-x: auto;
   overflow-y: hidden;
@@ -318,36 +325,29 @@ input[type="file"] { font-size: 0.9rem; }
 .rail-skeletons { display: flex; gap: 14px; margin-top: 16px; overflow: hidden; }
 .rail-skeleton { flex: 0 0 168px; }
 
-/* Edge fades + arrows: desktop affordances (hover-capable pointers).
-   Logical insets mirror them in RTL automatically. */
-.rail-fade {
-  position: absolute; top: 0; bottom: 0; width: 56px;
-  pointer-events: none; display: none;
+/* Rail controls: a row BELOW the cards, never overlaid on them — no
+   control may cover or clip a card at either end. The row is forced
+   LTR so the two directional arrows keep identical positions and
+   glyphs in English and Hebrew (left arrow left, right arrow right,
+   grouped at the physical right). Desktop affordance only
+   (hover-capable pointers); touch devices swipe. */
+.rail-controls {
+  display: none;
+  direction: ltr;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
 }
-.rail-fade-start {
-  inset-inline-start: 0;
-  background: linear-gradient(to right, var(--bg) 0%, transparent 100%);
-}
-.rail-fade-end {
-  inset-inline-end: 0;
-  background: linear-gradient(to left, var(--bg) 0%, transparent 100%);
-}
-html[dir="rtl"] .rail-fade-start { background: linear-gradient(to left, var(--bg) 0%, transparent 100%); }
-html[dir="rtl"] .rail-fade-end { background: linear-gradient(to right, var(--bg) 0%, transparent 100%); }
 .rail-arrow {
-  position: absolute; top: 38%;
-  width: 40px; height: 40px; border-radius: 50%;
+  width: 36px; height: 36px; border-radius: 50%;
   border: 1px solid var(--line-strong);
-  background: rgba(12, 14, 20, 0.88); color: #fff;
-  font-size: 1.5rem; line-height: 1; cursor: pointer;
-  display: none; align-items: center; justify-content: center; z-index: 2;
+  background: var(--card); color: #fff;
+  font-size: 1.4rem; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
 }
-.rail-arrow-back { inset-inline-start: 6px; }
-.rail-arrow-forward { inset-inline-end: 6px; }
 .rail-arrow:hover { border-color: var(--red-bright); }
 @media (hover: hover) and (pointer: fine) {
-  .rail-fade { display: block; }
-  .rail-arrow { display: flex; }
+  .rail-controls { display: flex; }
 }
 @media (prefers-reduced-motion: reduce) {
   .rail-viewport { scroll-behavior: auto; }

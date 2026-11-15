@@ -83,17 +83,31 @@ export function mockEmbedTexts(texts: string[]): number[][] {
 
 // ---------------------------------------------------------------- mock chat
 
+// Keyword routing for mock consolidation — SIMULATION ONLY. The
+// production model routes by meaning; the mock can only match cue
+// words, so these lists exist to make dev-environment notes land in
+// the sections a Hebrew/English speaker would expect. Keep them
+// tight: a cue must clearly signal the mode on its own, because a
+// false match mis-routes the whole statement. Ambiguous notes still
+// default to Shared (routeNote below), exactly like production's
+// when-in-doubt rule. Ratings never reach this router — they always
+// land in Shared.
 const CASUAL_CUES = [
   'casual', 'light', 'tired', 'background', 'easy', 'dip into', 'short',
+  'funny', 'comed', 'sitcom',
   'קליל', 'עייפ', 'ברקע', 'פשוט', 'קל ', 'כשבא לי משהו קל',
+  'קצר', 'קומי', 'קומדיה', 'מצחיק', 'כיף', 'סיטקום',
 ];
 const DEEP_CUES = [
   'deep', 'concentrat', 'immersive', 'attention', 'complex', 'slow burn',
-  'serialized', 'demands attention', 'מעמיק', 'ריכוז', 'להתרכז', 'סוחף',
-  'מורכב', 'דורש ריכוז',
+  'serialized', 'demands attention',
+  'thriller', 'suspense', 'drama', 'crime', 'mystery', 'action', 'tense',
+  'מעמיק', 'ריכוז', 'להתרכז', 'סוחף', 'מורכב', 'דורש ריכוז',
+  'משמעות', 'מתח', 'מותח', 'אקשן', 'דרמה', 'פשע', 'מסתור', 'רציני',
 ];
 
-function routeNote(text: string): 'shared' | 'casual' | 'deep' {
+/** Route one free-text statement to a section. Exported for selftest. */
+export function routeNote(text: string): 'shared' | 'casual' | 'deep' {
   const lower = text.toLowerCase();
   if (CASUAL_CUES.some((cue) => lower.includes(cue.toLowerCase()))) return 'casual';
   if (DEEP_CUES.some((cue) => lower.includes(cue.toLowerCase()))) return 'deep';

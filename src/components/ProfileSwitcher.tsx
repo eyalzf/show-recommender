@@ -46,7 +46,7 @@ export function ProfileSwitcher({ lang, profiles, active, onSelect }: Props) {
         aria-expanded={open}
         aria-label={t(lang, 'whoWatching')}
       >
-        <ProfileIcon profile={active} size={28} className="profile-icon profile-icon-sm" />
+        <ProfileIcon profile={active} size={28} className="profile-icon-plain profile-icon-sm" />
         <span className="profile-switcher-name">{active.name}</span>
         <span aria-hidden="true">{open ? '▴' : '▾'}</span>
       </button>
@@ -63,7 +63,7 @@ export function ProfileSwitcher({ lang, profiles, active, onSelect }: Props) {
                 if (p.id !== active.id) onSelect(p);
               }}
             >
-              <ProfileIcon profile={p} size={28} className="profile-icon profile-icon-sm" />
+              <ProfileIcon profile={p} size={28} className="profile-icon-plain profile-icon-sm" />
               <span className="profile-switcher-name">{p.name}</span>
             </button>
           ))}

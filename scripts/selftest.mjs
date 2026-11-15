@@ -34,16 +34,20 @@ await build({
 const rail = await import(railOutFile);
 await unlink(railOutFile).catch(() => {});
 
-// railScrollDelta: forward reveals the next cards in both directions.
-assert.equal(rail.railScrollDelta('ltr', true, 800), 800);
-assert.equal(rail.railScrollDelta('ltr', false, 800), -800);
-assert.equal(rail.railScrollDelta('rtl', true, 800), -800);
-assert.equal(rail.railScrollDelta('rtl', false, 800), 800);
-assert.ok(rail.railScrollDelta('ltr', true, 0) === 0);
-assert.ok(rail.railScrollDelta('rtl', true, 0) === 0);
-// railArrowGlyphs: the forward arrow points LEFT in RTL, RIGHT in LTR.
-assert.deepEqual(rail.railArrowGlyphs('en'), { forward: '›', back: '‹' });
-assert.deepEqual(rail.railArrowGlyphs('he'), { forward: '‹', back: '›' });
+// railScrollDelta: PHYSICAL arrows — the delta depends only on which
+// arrow was pressed, never on document direction. The right arrow
+// moves the visible window rightward (positive delta), the left arrow
+// leftward (negative delta), identically in LTR and RTL. The helper
+// takes no direction argument, so a locale-dependent sign flip cannot
+// be expressed through this API.
+assert.equal(rail.railScrollDelta(true, 800), 800);
+assert.equal(rail.railScrollDelta(false, 800), -800);
+assert.ok(rail.railScrollDelta(true, 0) === 0);
+assert.ok(rail.railScrollDelta(false, 0) === 0);
+// Arrow glyphs: directional, identical in English and Hebrew — never
+// mirrored, never swapped between languages.
+assert.equal(rail.RAIL_ARROW_LEFT, '‹');
+assert.equal(rail.RAIL_ARROW_RIGHT, '›');
 
 // normalizeTitle
 assert.equal(util.normalizeTitle('Fauda!'), 'fauda');
@@ -546,6 +550,35 @@ assert.ok(consolParsed.sections.casual.includes('light')); // casual cue routes
 assert.ok(consolParsed.sections.deep.includes('immersive')); // deep cue routes
 assert.deepEqual(consolParsed.contradictions, []);
 assert.equal(consolParsed.languageConflict, null);
+
+// --- mock Hebrew cue routing (dev-only simulation fidelity) ---
+// Eyal's exact dev-profile sentences route to the right sections when
+// each is its own note (the mock routes per statement line, as the
+// consolidation prompt renders one line per feedback entry).
+assert.equal(mockLlm.routeNote('אוהב סדרות קומיות קצרות.'), 'casual');
+assert.equal(mockLlm.routeNote('לצפייה משמעותית אוהב אקשן ומתח.'), 'deep');
+// Ambiguous notes still default to Shared.
+assert.equal(mockLlm.routeNote('אוהב סדרות ישראליות.'), 'shared');
+assert.equal(mockLlm.routeNote('No horror, please.'), 'shared');
+// More cue coverage, both languages; casual wins on a mixed line
+// (documented first-match order, unchanged).
+assert.equal(mockLlm.routeNote('Something funny and short'), 'casual');
+assert.equal(mockLlm.routeNote('A tense thriller with a complex plot'), 'deep');
+assert.equal(mockLlm.routeNote('סדרת פשע מותחת ורצינית'), 'deep');
+assert.equal(mockLlm.routeNote('משהו מצחיק וקליל ברקע'), 'casual');
+assert.equal(mockLlm.routeNote('light comedy but also deep drama'), 'casual');
+// End-to-end through the real prompt builder: his two sentences as two
+// notes populate Casual and Deep, and an ambiguous note stays Shared.
+const hebrewNotes = [
+  { kind: 'note', source: 'note', text: 'אוהב סדרות קומיות קצרות.', createdAt: 1 },
+  { kind: 'note', source: 'note', text: 'לצפייה משמעותית אוהב אקשן ומתח.', createdAt: 2 },
+  { kind: 'note', source: 'note', text: 'אוהב סדרות ישראליות.', createdAt: 3 },
+];
+const hebrewReq = llm.buildConsolidationPrompt(hebrewNotes, 'he', null, ['he', 'en']);
+const hebrewParsed = util.parseConsolidationResponse(await mockProvider.generate(hebrewReq));
+assert.ok(hebrewParsed.sections.casual.includes('קומיות'));
+assert.ok(hebrewParsed.sections.deep.includes('אקשן'));
+assert.ok(hebrewParsed.sections.shared.includes('ישראליות'));
 
 const rankCands = [
   { tmdbId: 11, title: 'Alpha Show', year: '2020', genres: ['Comedy'], originalLanguage: 'en', originCountry: ['US'], anchorTitle: 'Seinfeld' },
