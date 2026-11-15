@@ -259,7 +259,7 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
     try {
       const text = note.trim();
       if (text && text !== noteBaseline) {
-        await api.addNote(profile.id, 'note', text);
+        await api.addNote(profile.id, text);
       }
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { Profile, TasteContradiction, TasteSectionKey, TasteSections, UiLang } from '../types';
 import { ApiError } from '../types';
@@ -47,11 +47,17 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
     message: string;
   } | null>(null);
   const [languages, setLanguages] = useState<string[]>(profile.languages);
-  const [notes, setNotes] = useState<{ id: string; kind: string; text: string }[]>([]);
   const [note, setNote] = useState('');
-  const [noteKind, setNoteKind] = useState<'like' | 'dislike'>('like');
-  const [consolidating, setConsolidating] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // Guards the post-note polling loop against unmount.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     api.taste(profile.id, lang).then((res) => {
@@ -59,7 +65,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       setStub(Boolean(res.stub));
       setContradiction(res.contradiction);
       setLanguageConflict(res.languageConflict);
-      setNotes(res.notes);
       if (res.profile) setLanguages(res.profile.languages);
     });
   }, [profile.id, lang]);
@@ -121,41 +126,48 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   };
 
   const addNote = async () => {
-    if (!note.trim()) return;
+    if (!note.trim() || updating) return;
     const text = note.trim();
+    const before = JSON.stringify(sections);
     setNote('');
+    setNotice(null);
     try {
-      await api.addNote(profile.id, noteKind, text);
-      setNotes((prev) => [{ id: `local-${Date.now()}`, kind: noteKind, text }, ...prev]);
-      setNotice(t(lang, 'noteSaved'));
+      await api.addNote(profile.id, text);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
         setNotice(t(lang, 'notSaved'));
       } else {
         setNotice(t(lang, 'searchError'));
       }
+      return;
     }
-  };
-
-  const consolidate = async () => {
-    setConsolidating(true);
+    // The server consolidates in the background on every note write.
+    // Poll until the sections change or a sane timeout, then show
+    // whatever the server returns — never hang the UI.
+    setUpdating(true);
     try {
-      const res = await api.consolidate(profile.id, lang);
-      setSections(sectionsFromResponse(res));
-      setContradiction(res.contradictions[0] ?? null);
-      if (res.languageConflict) {
-        setLanguageConflict({
-          praisedLanguage: res.languageConflict.languageName,
-          languageCode: res.languageConflict.languageCode,
-          message:
-            res.languageConflict.message ??
-            (lang === 'he'
-              ? `ההערות משבחות ${res.languageConflict.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
-              : `Your notes praise ${res.languageConflict.languageName}, but it is not in this profile's language filter.`),
-        });
+      const deadline = Date.now() + 30000;
+      let latest: TasteSections | null = null;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        if (!aliveRef.current) return;
+        try {
+          const res = await api.taste(profile.id, lang);
+          latest = sectionsFromResponse(res);
+          if (JSON.stringify(latest) !== before || Date.now() >= deadline) {
+            setSections(latest);
+            setContradiction(res.contradiction);
+            setLanguageConflict(res.languageConflict);
+            break;
+          }
+        } catch {
+          if (Date.now() >= deadline) break;
+        }
+        if (Date.now() >= deadline) break;
       }
+      if (latest && aliveRef.current) setNotice(t(lang, 'noteSaved'));
     } finally {
-      setConsolidating(false);
+      if (aliveRef.current) setUpdating(false);
     }
   };
 
@@ -213,9 +225,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
           )}
         </div>
       ))}
-      <button type="button" className="btn" onClick={consolidate} disabled={consolidating}>
-        {consolidating ? t(lang, 'loading') : t(lang, 'refresh')}
-      </button>
 
       {contradiction ? (
         <div className="contradiction">
@@ -256,43 +265,22 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       ) : null}
 
       <div>
-        <div className="rating-row" role="group">
-          <button
-            type="button"
-            className={noteKind === 'like' ? 'btn btn-primary' : 'btn'}
-            onClick={() => setNoteKind('like')}
-          >
-            {t(lang, 'noteKindLike')}
-          </button>
-          <button
-            type="button"
-            className={noteKind === 'dislike' ? 'btn btn-primary' : 'btn'}
-            onClick={() => setNoteKind('dislike')}
-          >
-            {t(lang, 'noteKindDislike')}
-          </button>
-        </div>
+        <p className="taste-hint">{t(lang, 'noteAutoUpdateHint')}</p>
         <input
           type="text"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder={t(lang, 'addNotePlaceholder')}
           aria-label={t(lang, 'addNotePlaceholder')}
+          disabled={updating}
         />
-        <button type="button" className="btn" onClick={addNote} disabled={!note.trim()}>
+        <button type="button" className="btn" onClick={addNote} disabled={!note.trim() || updating}>
           {t(lang, 'addNote')}
         </button>
+        {updating ? (
+          <p className="notice" role="status">{t(lang, 'noteUpdating')}</p>
+        ) : null}
       </div>
-
-      {notes.length > 0 ? (
-        <ul className="inbox">
-          {notes.map((n) => (
-            <li key={n.id}>
-              <strong>{n.kind}</strong> — {n.text}
-            </li>
-          ))}
-        </ul>
-      ) : null}
 
       <h3>{t(lang, 'languagesLabel')}</h3>
       <div className="chips">

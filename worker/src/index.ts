@@ -593,20 +593,24 @@ app.post('/api/deny', async (c: Ctx) => {
   return c.json({ ok: true });
 });
 
-// Continuous free-text like/dislike notes (kind='note' in the raw log).
+// Continuous free-text notes (kind='note' in the raw log). Notes carry
+// no explicit like/dislike choice — sentiment is inferred from the
+// wording at consolidation time. `kind` is accepted for back-compat
+// with older clients and defaults to 'note' when omitted.
 app.post('/api/notes', async (c: Ctx) => {
   const denied = dbRequired(c);
   if (denied) return denied;
   const body = await c.req.json().catch(() => ({}));
   const { profileId, kind, text } = body as { profileId?: string; kind?: string; text?: string };
-  if (!profileId || !['like', 'dislike', 'note'].includes(String(kind)) || !String(text ?? '').trim()) {
+  const noteKind = kind === undefined ? 'note' : String(kind);
+  if (!profileId || !['like', 'dislike', 'note'].includes(noteKind) || !String(text ?? '').trim()) {
     return c.json(
-      { error: 'bad_request', message: 'profileId, kind like|dislike|note, and non-empty text are required.' },
+      { error: 'bad_request', message: 'profileId and non-empty text are required.' },
       400,
     );
   }
   await requireProfileAccess(c, profileId);
-  await insertNote(c.env.DB!, profileId, kind as 'like' | 'dislike', String(text).trim());
+  await insertNote(c.env.DB!, profileId, noteKind as 'like' | 'dislike' | 'note', String(text).trim());
   await invalidateLists(c.env.DB!, profileId);
   // Event-driven consolidation (background): the living summary follows
   // new notes, same as feedback.

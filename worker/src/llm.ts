@@ -110,6 +110,12 @@ export interface ConsolidationNote {
  * Routing rules (the default-to-Shared rule is load-bearing: on any
  * ambiguity the statement stays Shared, which is exactly the old
  * single-summary behavior, so a routing miss costs nothing).
+ *
+ * Free-text notes carry NO like/dislike label in this prompt: the model
+ * infers sentiment from the wording alone (the Preferences screen no
+ * longer asks the user to pick one). Ratings keep their kind label
+ * ([rating:liked]/[rating:disliked]/[rating:dropped]) — that is
+ * per-show feedback, a separate feature.
  */
 export function buildConsolidationPrompt(
   rawNotes: ConsolidationNote[],
@@ -117,7 +123,12 @@ export function buildConsolidationPrompt(
   existing: TasteSections | null,
   allowedLanguages: string[] = [],
 ): LlmRequest {
-  const notes = rawNotes.map((n) => `- [${n.source}:${n.kind}] ${n.text}`).join('\n');
+  // Notes render without a sentiment label — sentiment is inferred
+  // from the wording (see the SENTIMENT rule below). Ratings keep
+  // their kind: [rating:liked] / [rating:disliked] / [rating:dropped].
+  const notes = rawNotes
+    .map((n) => `- [${n.source === 'note' ? 'note' : `rating:${n.kind}`}] ${n.text}`)
+    .join('\n');
   const existingText = existing ? formatSectionsForPrompt(existing) : '';
   return {
     system:
@@ -128,10 +139,14 @@ export function buildConsolidationPrompt(
       '. Keep nuance (e.g. per-language likes/dislikes). Do not invent shows or preferences not in the notes. ' +
       'ROUTING RULES — every statement goes to exactly one section: ' +
       '1) Entries marked [rating:*] come from show ratings (liked/disliked/dropped). Their statements ALWAYS go to Shared, never to Casual or Deep focus. ' +
-      '2) Free-text notes ([note:*]) are routed by meaning. Explicit mode wording routes directly: "for casual", "light evenings", "when tired", "background watching" go to Casual; "for deep focus", "when I can concentrate", "immersive", "full attention" go to Deep focus — Hebrew equivalents too: "קליל", "ערב קליל", "כשעייפים", "ברקע" go to Casual; "מעמיק", "מיקוד עמוק", "כשאפשר להתרכז", "דורש ריכוז", "סוחף" go to Deep focus. ' +
+      '2) Free-text notes ([note]) are routed by meaning. Explicit mode wording routes directly: "for casual", "light evenings", "when tired", "background watching" go to Casual; "for deep focus", "when I can concentrate", "immersive", "full attention" go to Deep focus — Hebrew equivalents too: "קליל", "ערב קליל", "כשעייפים", "ברקע" go to Casual; "מעמיק", "מיקוד עמוק", "כשאפשר להתרכז", "דורש ריכוז", "סוחף" go to Deep focus. ' +
       '3) Implicit cues: lightness, ease, background-friendliness, short-and-simple, easy to dip into go to Casual; depth, complexity, serialization, demands attention, slow burn go to Deep focus. ' +
       '4) Genre, topic, language, and content likes/dislikes ("love Israeli drama", "no horror") go to Shared. ' +
       '5) WHEN IN DOUBT, Shared. Anything ambiguous defaults to Shared — never guess a mode. ' +
+      'SENTIMENT — free-text notes carry no like/dislike label: infer from the wording whether each note expresses a liking, a dislike, or a neutral constraint. ' +
+      'Dislike wording includes "no", "never", "avoid", "can\'t stand", "not for me", "hate" and Hebrew equivalents ("לא", "לעולם לא", "לא סובל/ת", "שונא/ת", "אין", "בלי"). ' +
+      'Liking wording includes "love", "like", "more of", "only", "great" and Hebrew equivalents ("אוהב/ת", "מאוד", "רק", "נהדר"). ' +
+      'A dislike must be preserved as an avoidance in the summary — never flip it into a liking, and never drop it. ' +
       'Preserve the existing summary\'s sectioning: keep statements in their current sections unless a note moves them. ' +
       'CONTRADICTIONS are scoped: list one ONLY when a newer note genuinely conflicts with the current summary or an older note WITHIN THE SAME SECTION. ' +
       'A Casual statement and a Deep-focus statement that look opposed (e.g. "nothing slow" for casual vs "love a slow burn" for deep focus) are NOT a contradiction — they coexist in different sections, never flag them. ' +

@@ -113,10 +113,12 @@ export const api = {
       body: JSON.stringify({ profileId, tmdbId }),
     }),
 
-  addNote: (profileId: string, kind: 'like' | 'dislike' | 'note', text: string) =>
+  // Free-text note, no sentiment choice — the server stores kind='note'
+  // and consolidation infers like/dislike from the wording.
+  addNote: (profileId: string, text: string) =>
     req<{ ok: true }>('/api/notes', {
       method: 'POST',
-      body: JSON.stringify({ profileId, kind, text }),
+      body: JSON.stringify({ profileId, text }),
     }),
 
   taste: (profileId: string, lang: UiLang) =>
