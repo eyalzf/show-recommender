@@ -9,16 +9,12 @@ name = "show-recommender"
 main = "worker/bundle.js"
 compatibility_date = "2024-11-01"
 
-# D1 database. NOTE: creating the D1 database via the API was BLOCKED on
-# 2026-11-15 — the Cloudflare API token returned HTTP 401 "Authentication
-# error" (code 10000) for both creating and listing D1 databases, i.e. the
-# token has no D1 permission. Create the database (dashboard or a token with
-# D1:Edit), apply worker/migrations/*.sql, then replace the placeholder
-# database_id below with the real id and redeploy.
+# D1 database. Created via the API on 2026-11-15 after the Cloudflare API
+# token gained D1:Edit; migrations in worker/migrations/ applied via the API.
 [[d1_databases]]
 binding = "DB"
 database_name = "show-recommender"
-database_id = "REPLACE-ME-AFTER-D1-CREATION"
+database_id = "42a31581-ed97-4ec9-9c68-8a8afae31cba"
 
 # R2 bucket for profile icons/images. Bucket `show-recommender` was created
 # via the API on 2026-11-15.
