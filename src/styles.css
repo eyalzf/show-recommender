@@ -79,7 +79,33 @@ body {
 .header-title .muted { margin: 6px 0 0; }
 .header-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .lang-toggle { display: flex; gap: 6px; }
-.profile-switcher select { width: auto; margin: 0; }
+
+/* Profile switcher dropdown (a native <select> cannot show icons). */
+.profile-switcher { position: relative; }
+.profile-switcher-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px 6px 8px; border: 1px solid var(--line-strong);
+  border-radius: 999px; background: var(--card); color: var(--text);
+  font: inherit; font-weight: 700; font-size: 0.9rem; cursor: pointer;
+}
+.profile-switcher-btn:hover { border-color: var(--red); }
+.profile-switcher-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-menu {
+  position: absolute; inset-inline-start: 0; top: calc(100% + 8px); z-index: 40;
+  min-width: 200px; padding: 6px;
+  background: var(--card); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.profile-menu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border: 0; border-radius: 10px; background: none;
+  color: var(--text); font: inherit; font-weight: 700; font-size: 0.9rem;
+  cursor: pointer; text-align: start;
+}
+.profile-menu-item:hover { background: #1d222d; }
+.profile-menu-item.is-active { background: rgba(240, 56, 61, 0.14); }
+.profile-icon-sm { width: 28px !important; height: 28px !important; font-size: 0.85rem !important; flex-shrink: 0; }
 
 .nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
 
@@ -285,6 +311,7 @@ input[type="file"] { font-size: 0.9rem; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .rail-card-rating { color: var(--gold-text); font-size: 0.85rem; font-weight: 700; }
+.rail-card-meta { color: var(--dim); font-size: 0.78rem; font-weight: 500; }
 .rail-card-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 
 /* Rail skeleton row: same shape as the rail, no scrolling. */

@@ -19,15 +19,18 @@ import { candidateEmbedText, embedTexts } from './embeddings';
 import {
   classifyKind,
   classifyType,
+  clusterFor,
   combineTasteSections,
   cosine,
-  displaySeasons,
   normalizeTitle,
+  orderCapped,
   paceFor,
   parseRankResponse,
+  selectCapped,
   structureFor,
   tasteTextForKind,
   toneFor,
+  type ClusterKey,
   type RankedEntry,
 } from './util';
 
@@ -56,6 +59,14 @@ import {
  * 10 so removals promote; fewer than 10 are shown with a reason, never
  * padded.
  *
+ * Diversity caps (settled 2026-11-15) keep a Top 10 from collapsing
+ * into one type of show: at most 3 shows per genre-ID cluster per list
+ * (see clusterFor in util.ts), plus a looser per-cluster cap on the
+ * rank pool so one cluster cannot crowd out the rest before ranking.
+ * Both caps relax when the pool is genuinely narrow — deferred
+ * candidates fill slots no uncapped alternative can fill — so the
+ * "fewer than 10 with a reason, never padded" rule still holds.
+ *
  * Subrequest budget: at most ~36 TMDB calls per generation (free-plan
  * Workers allow 50 per invocation). Finalist details go through the
  * 180-day metadata cache, so repeat generations cost less.
@@ -76,6 +87,12 @@ export interface ListItemOut {
   structure: string;
   episodeMinutes: number;
   seasons: number;
+  /** Total episodes, excluding season 0 (specials). */
+  episodes: number;
+  /** First air year, or null when unknown. */
+  firstYear: number | null;
+  /** Last air year, or null when unknown; ignored for ongoing shows (open-ended). */
+  lastYear: number | null;
   totalHours: number;
   language: string;
   country: string;
@@ -128,6 +145,10 @@ const MAX_LIKED_ANCHORS = 3;
 const MAX_REC_RESOLUTIONS = 5;
 const RANK_POOL_SIZE = 30;
 const TOP_N = 10;
+/** Max shows per genre-ID cluster in a Top 10 list (diversity cap). */
+const TOP_CLUSTER_CAP = 3;
+/** Max shows per genre-ID cluster in the rank pool (looser than the Top 10 cap). */
+const POOL_CLUSTER_CAP = 12;
 
 function toCandidate(r: TmdbSearchResult, genreMap: Map<number, string>): Candidate {
   return {
@@ -437,6 +458,10 @@ async function enrichToListItems(
         show.numberOfEpisodes != null && episodeMinutes > 0
           ? Math.round((show.numberOfEpisodes * episodeMinutes) / 60)
           : 0;
+      const yearOf = (date: string): number | null => {
+        const year = Number(date.slice(0, 4));
+        return Number.isInteger(year) && year > 0 ? year : null;
+      };
       items.push({
         rank: i + 1,
         tmdbId: show.tmdbId,
@@ -450,6 +475,9 @@ async function enrichToListItems(
         structure: structureFor(show.genreIds),
         episodeMinutes,
         seasons,
+        episodes: show.numberOfEpisodes ?? 0,
+        firstYear: yearOf(show.firstAirDate),
+        lastYear: yearOf(show.lastAirDate),
         totalHours,
         language: LANGUAGE_NAMES[show.originalLanguage] ?? show.originalLanguage,
         country: show.originCountry[0] ?? '',
@@ -515,25 +543,29 @@ export async function generateLists(
     .filter((cand) => classifyKind(cand.genreIds) === 'deep')
     .sort(byScore);
 
-  // Backfill a starved bucket (fewer primaries than a Top 10) from the
-  // other bucket's pool, best retrieval score first. Borrowed candidates
-  // are strict: the re-rank must accept them or they never surface.
-  const withBackfill = (primary: Candidate[], other: Candidate[]) => {
-    const picked = primary.slice(0, RANK_POOL_SIZE);
+  // Rank-pool construction per kind: primaries in retrieval-score order,
+  // backfilled from the other bucket's pool when starved (fewer
+  // primaries than a Top 10 — borrowed candidates are strict: the
+  // re-rank must accept them or they never surface), then the pool
+  // diversity cap so one cluster cannot crowd out the rest before
+  // ranking. The cap relaxes on narrow pools (see selectCapped).
+  const buildRankPool = (primary: Candidate[], other: Candidate[]) => {
+    const ordered = [...primary];
     const strictIds = new Set<number>();
     if (primary.length < TOP_N) {
-      const pickedIds = new Set(picked.map((cand) => cand.tmdbId));
+      const seen = new Set(primary.map((cand) => cand.tmdbId));
       for (const cand of other) {
-        if (picked.length >= RANK_POOL_SIZE) break;
-        if (pickedIds.has(cand.tmdbId)) continue;
-        picked.push(cand);
+        if (seen.has(cand.tmdbId)) continue;
+        seen.add(cand.tmdbId);
+        ordered.push(cand);
         strictIds.add(cand.tmdbId);
       }
     }
+    const picked = selectCapped(ordered, (cand) => clusterFor(cand.genreIds), POOL_CLUSTER_CAP, RANK_POOL_SIZE);
     return { picked, strictIds };
   };
-  const casualBucket = withBackfill(casualPrimary, deepPrimary);
-  const deepBucket = withBackfill(deepPrimary, casualPrimary);
+  const casualBucket = buildRankPool(casualPrimary, deepPrimary);
+  const deepBucket = buildRankPool(deepPrimary, casualPrimary);
   const casualCands = casualBucket.picked;
   const deepCands = deepBucket.picked;
 
@@ -541,8 +573,20 @@ export async function generateLists(
     rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRanking(ctx, 'casual'), uiLang),
     rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRanking(ctx, 'deep'), uiLang),
   ]);
-  const casualRanked = casualRank.ranked;
-  const deepRanked = deepRank.ranked;
+  // Top 10 diversity cap, per list: at most TOP_CLUSTER_CAP shows per
+  // genre-ID cluster. Applied as a reorder (capped picks first, deferred
+  // after), so enrichment's Top 10 slice takes the diverse order while
+  // over-cap shows stay available as spares. Deferred items fill slots
+  // only past the slice — i.e. the cap binds whenever enough relevant
+  // alternatives exist, and relaxes on narrow pools.
+  const capRanked = (ranked: RankedEntry[], pool: Candidate[]): RankedEntry[] => {
+    const genreIdsById = new Map(pool.map((cand) => [cand.tmdbId, cand.genreIds]));
+    const clusterOf = (entry: RankedEntry): ClusterKey =>
+      clusterFor(genreIdsById.get(entry.tmdbId) ?? []);
+    return orderCapped(ranked, clusterOf, TOP_CLUSTER_CAP);
+  };
+  const casualRanked = capRanked(casualRank.ranked, casualCands);
+  const deepRanked = capRanked(deepRank.ranked, deepCands);
 
   const [casualItems, deepItems] = await Promise.all([
     enrichToListItems(c, casualRanked, ctx, uiLang),

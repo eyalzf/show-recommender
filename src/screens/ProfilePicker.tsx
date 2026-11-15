@@ -1,5 +1,6 @@
 import type { Profile, UiLang } from '../types';
 import { t } from '../i18n';
+import { ProfileIcon } from '../components/ProfileIcon';
 
 interface Props {
   lang: UiLang;
@@ -13,28 +14,6 @@ interface Props {
  * incomplete profile resumes it (the gate lives in App). No personal vs.
  * joint types. */
 export function ProfilePicker({ lang, profiles, stub, onSelect, onCreateNew }: Props) {
-  const renderIcon = (p: Profile) => {
-    if (p.iconKind === 'image' && p.iconRef) {
-      return (
-        <img
-          className="profile-icon-img"
-          src={`/api/profiles/${encodeURIComponent(p.id)}/icon`}
-          alt=""
-          width="48"
-          height="48"
-        />
-      );
-    }
-    if (p.iconKind === 'icon' && p.iconRef) {
-      return <span className="profile-icon" aria-hidden="true">{p.iconRef}</span>;
-    }
-    return (
-      <span className="profile-icon" aria-hidden="true">
-        {p.name.trim().charAt(0).toUpperCase()}
-      </span>
-    );
-  };
-
   return (
     <section>
       <h2>{t(lang, 'whoWatching')}</h2>
@@ -44,7 +23,7 @@ export function ProfilePicker({ lang, profiles, stub, onSelect, onCreateNew }: P
           const incomplete = p.bootstrap && !p.bootstrap.complete;
           return (
             <button key={p.id} type="button" className="profile-card" onClick={() => onSelect(p)}>
-              {renderIcon(p)}
+              <ProfileIcon profile={p} />
               <span className="profile-name">{p.name}</span>
               {incomplete ? (
                 <span className="profile-meta">{t(lang, 'setupIncomplete')}</span>

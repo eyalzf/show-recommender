@@ -186,6 +186,8 @@ export function buildRankPrompt(
     system:
       'You rank TV shows for a household profile. Rank ONLY the shows listed below, by TMDB id. ' +
       'Base every judgment ONLY on the taste description and the listed attributes (title, year, genres, language, country). ' +
+      'Balance variety across genres, eras, and countries of origin while staying relevant to the taste text: ' +
+      'do not fill the list with near-identical shows (for example all animation, or all sci-fi) when relevant alternatives are listed. ' +
       'Do NOT invent plot details, cast, or qualities not in the list. Write rationales ONLY in ' +
       (uiLang === 'he' ? 'Hebrew' : 'English') +
       '. Return ONLY a JSON object, no other text: ' +

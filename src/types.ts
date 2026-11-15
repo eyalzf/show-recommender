@@ -84,6 +84,12 @@ export interface ListItem {
   structure: string;
   episodeMinutes: number;
   seasons: number;
+  /** Total episodes, excluding season 0 (specials). */
+  episodes: number;
+  /** First air year, or null when unknown. */
+  firstYear: number | null;
+  /** Last air year, or null when unknown; ignored for ongoing shows (open-ended). */
+  lastYear: number | null;
   totalHours: number;
   language: string;
   country: string;
@@ -103,6 +109,8 @@ export interface ShowDetail {
   autoTranslated: boolean;
   posterPath: string | null;
   firstAirDate: string;
+  /** Last air date; empty for shows that have not aired yet. */
+  lastAirDate: string;
   genres: string[];
   originCountry: string[];
   originLabel: string | null;

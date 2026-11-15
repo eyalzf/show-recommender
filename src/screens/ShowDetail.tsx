@@ -3,6 +3,7 @@ import { api } from '../api';
 import type { ListItem, Profile, Rating, ShowDetail, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
+import { yearRangeLabel } from '../showMeta';
 
 interface Props {
   lang: UiLang;
@@ -70,6 +71,12 @@ export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
     show.numberOfEpisodes && show.episodeRunTime?.[0]
       ? Math.round((show.numberOfEpisodes * show.episodeRunTime[0]) / 60)
       : null;
+  const yearOf = (date: string): number | null => {
+    const year = Number(date.slice(0, 4));
+    return Number.isInteger(year) && year > 0 ? year : null;
+  };
+  const ongoing = show.status === 'Returning Series' || show.status === 'In Production';
+  const years = yearRangeLabel(yearOf(show.firstAirDate), yearOf(show.lastAirDate ?? ''), ongoing);
 
   return (
     <section>
@@ -92,7 +99,7 @@ export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
             {show.genres.map((g) => (
               <span key={g} className="chip chip-purple">{g}</span>
             ))}
-            {show.firstAirDate ? <span className="chip">{show.firstAirDate.slice(0, 4)}</span> : null}
+            {years ? <span className="chip">{years}</span> : null}
             {show.numberOfSeasons != null ? <span className="chip">{show.numberOfSeasons} {t(lang, 'seasons')}</span> : null}
             {show.numberOfEpisodes != null ? <span className="chip">{show.numberOfEpisodes} {t(lang, 'episodes')}</span> : null}
             {show.episodeRunTime?.[0] ? <span className="chip">{show.episodeRunTime[0]} {t(lang, 'minEps')}</span> : null}

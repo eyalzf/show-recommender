@@ -35,6 +35,9 @@ export interface StubListItem {
   structure: 'serialized' | 'episodic';
   episodeMinutes: number;
   seasons: number;
+  episodes: number;
+  firstYear: number | null;
+  lastYear: number | null;
   totalHours: number;
   language: string;
   country: string;
@@ -48,7 +51,7 @@ export const STUB_CASUAL: StubListItem[] = [
   {
     rank: 1, tmdbId: 0, title: 'Kupa Rashit', originalTitle: 'Kupa Rashit', voteAverage: 7.2, type: 'series',
     genres: ['Comedy'], tone: 'Warm', pace: 'Brisk', structure: 'episodic',
-    episodeMinutes: 25, seasons: 4, totalHours: 20, language: 'Hebrew', country: 'IL',
+    episodeMinutes: 25, seasons: 4, episodes: 60, firstYear: 2018, lastYear: null, totalHours: 20, language: 'Hebrew', country: 'IL',
     status: 'ongoing',
     rationale: 'Warm workplace humour like the comedies you rated highly.',
     risk: null, posterPath: null,
@@ -56,7 +59,7 @@ export const STUB_CASUAL: StubListItem[] = [
   {
     rank: 2, tmdbId: 0, title: 'A gentle British mystery', originalTitle: 'A gentle British mystery', voteAverage: 7.0, type: 'series',
     genres: ['Mystery'], tone: 'Cosy', pace: 'Steady', structure: 'episodic',
-    episodeMinutes: 45, seasons: 2, totalHours: 12, language: 'English', country: 'UK',
+    episodeMinutes: 45, seasons: 2, episodes: 12, firstYear: 2020, lastYear: 2022, totalHours: 12, language: 'English', country: 'UK',
     status: 'ended',
     rationale: 'Self-contained cases; echoes your liked detective pick.',
     risk: null, posterPath: null,
@@ -67,7 +70,7 @@ export const STUB_DEEP: StubListItem[] = [
   {
     rank: 1, tmdbId: 0, title: 'Tehran', originalTitle: 'Tehran', voteAverage: 7.5, type: 'series',
     genres: ['Thriller', 'Drama'], tone: 'Tense', pace: 'Fast', structure: 'serialized',
-    episodeMinutes: 45, seasons: 3, totalHours: 24, language: 'Hebrew', country: 'IL',
+    episodeMinutes: 45, seasons: 3, episodes: 24, firstYear: 2020, lastYear: null, totalHours: 24, language: 'Hebrew', country: 'IL',
     status: 'ongoing',
     rationale: 'Tension in the mode of Fauda, which you both rated highly.',
     risk: 'Serialized — not a skip-an-episode show.', posterPath: null,

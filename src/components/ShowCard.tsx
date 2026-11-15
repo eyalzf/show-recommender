@@ -1,5 +1,6 @@
 import type { ListItem, UiLang } from '../types';
 import { t } from '../i18n';
+import { cardMetaLine } from '../showMeta';
 
 interface Props {
   item: ListItem;
@@ -15,12 +16,14 @@ const TMDB_RAIL_IMAGE_BASE = 'https://image.tmdb.org/t/p/w342';
 /**
  * Compact Top 10 rail card, NEXUS style: 2:3 poster with a rank badge,
  * title + small English subtitle (where the original title differs),
- * ★ TMDB rating, and the settled Remove/Rate quick actions in compact
- * form. Rationale, risk, and classification chips live in the show
- * detail view, not on the card. Poster and title both open detail.
+ * ★ TMDB rating, a compact meta line (years · seasons · episodes), and
+ * the settled Remove/Rate quick actions in compact form. Rationale,
+ * risk, and classification chips live in the show detail view, not on
+ * the card. Poster and title both open detail.
  */
 export function RailCard({ item, lang, onRemove, onRate, onOpen }: Props) {
   const showSubtitle = item.originalTitle && item.originalTitle !== item.title;
+  const meta = cardMetaLine(lang, item);
   return (
     <article className="rail-card">
       <div className="rail-card-poster-wrap">
@@ -55,6 +58,7 @@ export function RailCard({ item, lang, onRemove, onRate, onOpen }: Props) {
         {item.voteAverage > 0 ? (
           <div className="rail-card-rating">★ {item.voteAverage.toFixed(1)}</div>
         ) : null}
+        {meta ? <div className="rail-card-meta">{meta}</div> : null}
         <div className="rail-card-actions">
           <button type="button" className="btn btn-sm" onClick={() => onRemove(item)}>
             {t(lang, 'remove')}

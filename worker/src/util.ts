@@ -174,6 +174,141 @@ export function displaySeasons(
   return numberOfSeasons;
 }
 
+/**
+ * Display episode count: the sum of episode counts over seasons with
+ * season_number >= 1 — season 0 (specials) episodes never count.
+ * Falls back to the totals field when the seasons array is unavailable
+ * or carries no usable counts.
+ */
+export function displayEpisodes(
+  seasons: { season_number: number; episode_count: number }[] | null | undefined,
+  numberOfEpisodes: number | null,
+): number | null {
+  if (seasons && seasons.length > 0) {
+    const regular = seasons.filter((s) => s.season_number > 0);
+    if (regular.length > 0) {
+      const sum = regular.reduce((acc, s) => acc + (s.episode_count || 0), 0);
+      if (sum > 0) return sum;
+    }
+  }
+  return numberOfEpisodes;
+}
+
+// ---------------------------------------------------------------- diversity clusters
+//
+// Diversity caps (settled 2026-11-15) keep a Top 10 from collapsing into
+// one type of show (all cartoons, all sci-fi). Clusters are defined by
+// TMDB GENRE ID — never by genre name, because names are localized per
+// UI language and matching English names once starved the casual bucket
+// to zero for a Hebrew-language profile (see module header).
+//
+// A show belongs to exactly one cluster: the FIRST matching genre ID in
+// the fixed priority order below. The order is deliberate: the most
+// visually/tonally distinctive clusters win (Animation before Comedy,
+// so an animated comedy counts against the animation cap — the
+// complaint that motivated the caps was "only cartoons").
+
+export type ClusterKey =
+  | 'animation'
+  | 'comedy'
+  | 'drama'
+  | 'crime'
+  | 'scifi'
+  | 'documentary'
+  | 'reality'
+  | 'action'
+  | 'mystery'
+  | 'family'
+  | 'talk'
+  | 'other';
+
+/** Fixed priority order: first matching genre ID decides the cluster. */
+const CLUSTER_PRIORITY: { cluster: ClusterKey; genreIds: number[] }[] = [
+  { cluster: 'animation', genreIds: [GENRE_ANIMATION] },
+  { cluster: 'comedy', genreIds: [GENRE_COMEDY] },
+  { cluster: 'drama', genreIds: [GENRE_DRAMA] },
+  { cluster: 'crime', genreIds: [GENRE_CRIME] },
+  { cluster: 'scifi', genreIds: [GENRE_SCIFI_FANTASY] },
+  { cluster: 'documentary', genreIds: [GENRE_DOCUMENTARY] },
+  { cluster: 'reality', genreIds: [GENRE_REALITY] },
+  { cluster: 'action', genreIds: [GENRE_ACTION_ADVENTURE, GENRE_WAR_POLITICS, GENRE_WESTERN] },
+  { cluster: 'mystery', genreIds: [GENRE_MYSTERY] },
+  { cluster: 'family', genreIds: [GENRE_FAMILY, GENRE_KIDS] },
+  { cluster: 'talk', genreIds: [GENRE_TALK, GENRE_NEWS, GENRE_SOAP] },
+];
+
+export function clusterFor(genreIds: number[]): ClusterKey {
+  for (const { cluster, genreIds: ids } of CLUSTER_PRIORITY) {
+    if (ids.some((id) => genreIds.includes(id))) return cluster;
+  }
+  return 'other';
+}
+
+/**
+ * Greedy cluster-cap partition. Walks items in ranked order, accepting
+ * while the item's cluster is under `cap`; over-cap items are deferred
+ * (in ranked order), never dropped. The caller decides whether deferred
+ * items fill remaining slots (the relevance guard: only when no
+ * uncapped alternative exists — a narrow pool relaxes the cap rather
+ * than padding with junk or showing a needlessly short list).
+ */
+export function partitionByClusterCap<T>(
+  items: T[],
+  clusterOf: (item: T) => ClusterKey,
+  cap: number,
+): { picked: T[]; deferred: T[] } {
+  const counts = new Map<ClusterKey, number>();
+  const picked: T[] = [];
+  const deferred: T[] = [];
+  for (const item of items) {
+    const cluster = clusterOf(item);
+    const count = counts.get(cluster) ?? 0;
+    if (count < cap) {
+      counts.set(cluster, count + 1);
+      picked.push(item);
+    } else {
+      deferred.push(item);
+    }
+  }
+  return { picked, deferred };
+}
+
+/**
+ * Cap-aware selection of at most `limit` items: strict capped picks in
+ * ranked order first, then deferred items in ranked order ONLY to fill
+ * slots no uncapped candidate can fill (narrow-pool relaxation). Never
+ * invents items; a short input stays short.
+ */
+export function selectCapped<T>(
+  items: T[],
+  clusterOf: (item: T) => ClusterKey,
+  cap: number,
+  limit: number,
+): T[] {
+  const { picked, deferred } = partitionByClusterCap(items, clusterOf, cap);
+  const out = picked.slice(0, limit);
+  for (const item of deferred) {
+    if (out.length >= limit) break;
+    out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Cap-aware reorder of the full list: capped picks in ranked order,
+ * then deferred items in ranked order. Used where the caller slices
+ * afterwards (the Top 10 slice), so over-cap items stay available as
+ * spares instead of vanishing.
+ */
+export function orderCapped<T>(
+  items: T[],
+  clusterOf: (item: T) => ClusterKey,
+  cap: number,
+): T[] {
+  const { picked, deferred } = partitionByClusterCap(items, clusterOf, cap);
+  return [...picked, ...deferred];
+}
+
 // ---------------------------------------------------------------- taste sections
 //
 // The living taste summary is split into three sections (settled

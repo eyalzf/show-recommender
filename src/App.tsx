@@ -10,12 +10,12 @@ import { TasteProfile } from './screens/TasteProfile';
 import { Recommendations } from './screens/Recommendations';
 import { AdHoc } from './screens/AdHoc';
 import { ShowPicker } from './components/ShowPicker';
+import { ProfileSwitcher } from './components/ProfileSwitcher';
 
-const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navTaste' | 'navRecs' | 'navAdhoc' }[] = [
+const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navTaste' | 'navRecs' }[] = [
   { screen: 'home', labelKey: 'navHome' },
   { screen: 'taste', labelKey: 'navTaste' },
   { screen: 'recommendations', labelKey: 'navRecs' },
-  { screen: 'adhoc', labelKey: 'navAdhoc' },
 ];
 
 /** A profile gates to onboarding until the bootstrap minimum is complete. */
@@ -129,20 +129,12 @@ export function App() {
         </div>
         <div className="header-controls">
           {activeProfile ? (
-            <label className="profile-switcher">
-              <select
-                value={activeProfile.id}
-                onChange={(e) => {
-                  const p = profiles.find((x) => x.id === e.target.value);
-                  if (p) enterProfile(p);
-                }}
-                aria-label={t(lang, 'whoWatching')}
-              >
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            </label>
+            <ProfileSwitcher
+              lang={lang}
+              profiles={profiles}
+              active={activeProfile}
+              onSelect={enterProfile}
+            />
           ) : null}
           <div className="lang-toggle" role="group" aria-label="Language / שפה">
             <button

@@ -96,6 +96,64 @@ assert.equal(
 );
 assert.equal(util.displaySeasons(null, 4), 4);
 
+// displayEpisodes: season 0 episodes never count; falls back to the total
+assert.equal(
+  util.displayEpisodes(
+    [
+      { season_number: 0, episode_count: 5 },
+      { season_number: 1, episode_count: 10 },
+      { season_number: 2, episode_count: 8 },
+    ],
+    23,
+  ),
+  18,
+);
+assert.equal(util.displayEpisodes(null, 40), 40);
+assert.equal(util.displayEpisodes([{ season_number: 0, episode_count: 3 }], 3), 3);
+
+// clusterFor: genre IDs, fixed priority order (Animation wins over Comedy)
+assert.equal(util.clusterFor([16, 35]), 'animation');
+assert.equal(util.clusterFor([35]), 'comedy');
+assert.equal(util.clusterFor([18]), 'drama');
+assert.equal(util.clusterFor([80]), 'crime');
+assert.equal(util.clusterFor([10765]), 'scifi');
+assert.equal(util.clusterFor([99]), 'documentary');
+assert.equal(util.clusterFor([10764]), 'reality');
+assert.equal(util.clusterFor([10759]), 'action');
+assert.equal(util.clusterFor([9648]), 'mystery');
+assert.equal(util.clusterFor([10751]), 'family');
+assert.equal(util.clusterFor([10767]), 'talk');
+assert.equal(util.clusterFor([18, 80]), 'drama'); // Drama outranks Crime
+assert.equal(util.clusterFor([]), 'other');
+
+// Diversity caps: strict picks first, deferred fill only narrow pools
+const capItems = [
+  { id: 1, g: [16] }, { id: 2, g: [16] }, { id: 3, g: [16] }, { id: 4, g: [16] },
+  { id: 5, g: [35] }, { id: 6, g: [18] }, { id: 7, g: [18] }, { id: 8, g: [80] },
+];
+const part = util.partitionByClusterCap(capItems, (x) => util.clusterFor(x.g), 3);
+assert.deepEqual(part.picked.map((x) => x.id), [1, 2, 3, 5, 6, 7, 8]);
+assert.deepEqual(part.deferred.map((x) => x.id), [4]);
+assert.deepEqual(
+  util.selectCapped(capItems, (x) => util.clusterFor(x.g), 3, 5).map((x) => x.id),
+  [1, 2, 3, 5, 6],
+);
+assert.deepEqual(
+  util.orderCapped(capItems, (x) => util.clusterFor(x.g), 3).map((x) => x.id),
+  [1, 2, 3, 5, 6, 7, 8, 4],
+);
+// Narrow pool: the cap relaxes, deferred items fill the remaining slots
+const narrow = [{ id: 1, g: [16] }, { id: 2, g: [16] }, { id: 3, g: [16] }, { id: 4, g: [16] }];
+assert.deepEqual(
+  util.selectCapped(narrow, (x) => util.clusterFor(x.g), 3, 4).map((x) => x.id),
+  [1, 2, 3, 4],
+);
+// A short input stays short — caps never invent items
+assert.deepEqual(
+  util.selectCapped(narrow.slice(0, 2), (x) => util.clusterFor(x.g), 3, 10).map((x) => x.id),
+  [1, 2],
+);
+
 // parseRankResponse: validates ids, dedupes, tolerates prose around JSON
 const rankText = 'Here you go:\n{"ranked": [{"tmdbId": 1, "rationale": "fits", "risk": null}, {"tmdbId": 999, "rationale": "invented"}], "shortReason": null}';
 const parsed = util.parseRankResponse(rankText, new Set([1, 2]));

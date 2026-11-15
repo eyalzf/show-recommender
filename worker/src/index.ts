@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import type { D1Database } from '@cloudflare/workers-types';
 import type { Env } from './env';
 import { getAuth, authMiddleware } from './auth';
 import {
@@ -49,6 +50,7 @@ import {
   detectLanguageConflict,
   parseConsolidationResponse,
   parseTasteSummary,
+  type Contradiction,
   type TasteSections,
 } from './util';
 import {
@@ -569,6 +571,10 @@ app.post('/api/feedback', async (c: Ctx) => {
   } catch (err) {
     console.error('people-score recompute failed', err);
   }
+  // Event-driven consolidation: the living summary follows new feedback
+  // (background via waitUntil — the write itself stays fast).
+  const profile = await loadProfile(c.env.DB!, profileId);
+  if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
   return c.json({ ok: true });
 });
 
@@ -602,10 +608,110 @@ app.post('/api/notes', async (c: Ctx) => {
   await requireProfileAccess(c, profileId);
   await insertNote(c.env.DB!, profileId, kind as 'like' | 'dislike', String(text).trim());
   await invalidateLists(c.env.DB!, profileId);
+  // Event-driven consolidation (background): the living summary follows
+  // new notes, same as feedback.
+  const profile = await loadProfile(c.env.DB!, profileId);
+  if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
   return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------- taste
+
+/**
+ * Consolidate a profile's raw feedback log into the living taste
+ * summary (sectioned) via the LLM layer, and persist it. Shared by the
+ * manual route and the event-driven background trigger below.
+ *
+ * Returns 'not_found' when the profile does not exist, 'no_ai' when no
+ * AI binding is present — a stub "summary" must never be saved.
+ * The prompt contains ONLY user-authored text (see llm.ts terms
+ * guardrail). The raw log is never modified.
+ */
+interface ConsolidationOutcome {
+  summary: string;
+  sections: TasteSections;
+  contradictions: Contradiction[];
+  languageConflict: {
+    languageCode: string;
+    languageName: string;
+    message?: string;
+  } | null;
+  provider: string;
+}
+
+async function consolidateFromLog(
+  env: Env,
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+): Promise<ConsolidationOutcome | 'not_found' | 'no_ai'> {
+  if (!env.AI) return 'no_ai';
+  const ctx = await loadProfileContext(db, profileId, uiLang);
+  if (!ctx) return 'not_found';
+  const provider = getLlmProvider(env);
+  const notes: ConsolidationNote[] = ctx.feedback
+    .filter((f) => f.text.trim().length > 0)
+    .map((f) => ({
+      kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
+      source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
+      text: f.showTitle ? `${f.showTitle}: ${f.text}` : f.text,
+      createdAt: f.createdAt,
+    }));
+  const raw = await provider.generate(
+    buildConsolidationPrompt(notes, uiLang, ctx.tasteSections, ctx.profile.languages),
+  );
+  const parsed = parseConsolidationResponse(raw);
+  // Keyword heuristic supplements the LLM's language-conflict call.
+  const heuristic = detectLanguageConflict(
+    notes.map((n) => n.text),
+    ctx.profile.languages,
+  );
+  const languageConflict =
+    parsed.languageConflict ??
+    (heuristic
+      ? {
+          languageCode: heuristic.languageCode,
+          languageName: heuristic.languageName,
+          message:
+            uiLang === 'he'
+              ? `ההערות משבחות ${heuristic.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
+              : `Your notes praise ${heuristic.languageName}, but it is not in this profile's language filter.`,
+        }
+      : null);
+  if (parsed.summary) {
+    await saveTasteSections(db, profileId, uiLang, parsed.sections);
+    await invalidateLists(db, profileId);
+  }
+  return {
+    summary: parsed.summary,
+    sections: parsed.sections,
+    contradictions: parsed.contradictions.slice(0, 3),
+    languageConflict,
+    provider: provider.name,
+  };
+}
+
+/**
+ * Event-driven consolidation (settled refresh model): after feedback or
+ * a note lands, re-consolidate in the background via waitUntil, so the
+ * write stays fast and the living summary never goes stale. Best
+ * effort — a failed consolidation must never fail the write, and the
+ * next write (or the GET /api/taste self-heal) retries it. Rapid
+ * successive writes may race; every run derives from the full raw log,
+ * so results converge, and the next trigger heals any stale winner.
+ */
+function scheduleConsolidation(c: Ctx, profileId: string, uiLang: string): void {
+  if (!hasDb(c) || !c.env.AI) return;
+  const task = (async () => {
+    try {
+      await consolidateFromLog(c.env, c.env.DB!, profileId, uiLang);
+    } catch (err) {
+      console.error('background consolidation failed', err);
+    }
+  })();
+  const ex = c.executionCtx as { waitUntil?: (p: Promise<unknown>) => void } | undefined;
+  if (ex?.waitUntil) ex.waitUntil(task);
+}
 
 app.get('/api/taste', async (c: Ctx) => {
   const profileId = c.req.query('profileId') ?? DEV_PROFILE_ID;
@@ -617,6 +723,12 @@ app.get('/api/taste', async (c: Ctx) => {
   const ctx = await loadProfileContext(c.env.DB!, profileId, lang);
   if (!ctx) {
     return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
+  }
+  // Self-heal: a profile with feedback but no stored summary yet (e.g.
+  // consolidation never ran, or it ran before this trigger existed)
+  // consolidates in the background; the next read shows the sections.
+  if (ctx.tasteSummary == null && ctx.feedback.length > 0) {
+    scheduleConsolidation(c, profileId, lang);
   }
   const allTexts = [
     ...ctx.notes.map((n) => n.text),
@@ -698,6 +810,9 @@ app.put('/api/taste', async (c: Ctx) => {
 
 // Consolidate raw notes into the living summary via the LLM layer.
 // The prompt contains ONLY user-authored text (see llm.ts terms guardrail).
+// The same consolidation also runs event-driven in the background after
+// feedback/note writes (scheduleConsolidation above); this route is the
+// manual re-run.
 app.post('/api/taste/consolidate', async (c: Ctx) => {
   const body = await c.req.json().catch(() => ({}));
   const { profileId, lang } = body as { profileId?: string; lang?: string };
@@ -706,70 +821,35 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
   }
   await requireProfileAccess(c, profileId);
   const uiLang = lang === 'he' ? 'he' : 'en';
-  const provider = getLlmProvider(c.env);
-
-  let notes: ConsolidationNote[] = [];
-  let existing: TasteSections | null = null;
-  let allowedLanguages: string[] = [];
-  if (hasDb(c)) {
-    const ctx = await loadProfileContext(c.env.DB!, profileId, uiLang);
-    if (!ctx) {
-      return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
-    }
-    allowedLanguages = ctx.profile.languages;
-    existing = ctx.tasteSections;
-    notes = ctx.feedback
-      .filter((f) => f.text.trim().length > 0)
-      .map((f) => ({
-        kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
-        source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
-        text: f.showTitle ? `${f.showTitle}: ${f.text}` : f.text,
-        createdAt: f.createdAt,
-      }));
-  } else {
-    notes = STUB_TASTE.notes.map((n) => ({
+  if (!hasDb(c)) {
+    const provider = getLlmProvider(c.env);
+    const notes: ConsolidationNote[] = STUB_TASTE.notes.map((n) => ({
       kind: n.kind,
       source: 'note' as const,
       text: n.text,
       createdAt: n.createdAt,
     }));
-    existing = parseTasteSummary(STUB_TASTE.summary);
-    allowedLanguages = STUB_PROFILE.languages;
+    const raw = await provider.generate(
+      buildConsolidationPrompt(notes, uiLang, parseTasteSummary(STUB_TASTE.summary), STUB_PROFILE.languages),
+    );
+    const parsed = parseConsolidationResponse(raw);
+    return c.json({
+      summary: parsed.summary,
+      sections: parsed.sections,
+      contradictions: parsed.contradictions.slice(0, 3),
+      languageConflict: parsed.languageConflict,
+      provider: provider.name,
+      stub: true,
+    });
   }
-
-  const raw = await provider.generate(buildConsolidationPrompt(notes, uiLang, existing, allowedLanguages));
-  const parsed = parseConsolidationResponse(raw);
-  // Keyword heuristic supplements the LLM's language-conflict call.
-  const heuristic = detectLanguageConflict(
-    notes.map((n) => n.text),
-    allowedLanguages,
-  );
-  const languageConflict =
-    parsed.languageConflict ??
-    (heuristic
-      ? {
-          languageCode: heuristic.languageCode,
-          languageName: heuristic.languageName,
-          message:
-            uiLang === 'he'
-              ? `ההערות משבחות ${heuristic.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
-              : `Your notes praise ${heuristic.languageName}, but it is not in this profile's language filter.`,
-        }
-      : null);
-  const contradictions = parsed.contradictions.slice(0, 3);
-
-  if (hasDb(c) && parsed.summary) {
-    await saveTasteSections(c.env.DB!, profileId, uiLang, parsed.sections);
-    await invalidateLists(c.env.DB!, profileId);
+  const outcome = await consolidateFromLog(c.env, c.env.DB!, profileId, uiLang);
+  if (outcome === 'not_found') {
+    return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
   }
-  return c.json({
-    summary: parsed.summary,
-    sections: parsed.sections,
-    contradictions,
-    languageConflict,
-    provider: provider.name,
-    stub: !hasDb(c),
-  });
+  if (outcome === 'no_ai') {
+    return c.json({ error: 'ai_not_configured', message: 'The Workers AI binding is not configured.' }, 503);
+  }
+  return c.json({ ...outcome, stub: false });
 });
 
 // ---------------------------------------------------------------- external recommendations

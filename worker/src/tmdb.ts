@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import type { Env } from './env';
-import { displaySeasons } from './util';
+import { displayEpisodes, displaySeasons } from './util';
 
 /**
  * Server-side TMDB client (api.themoviedb.org/3, Bearer token from the
@@ -81,6 +81,7 @@ export interface TmdbShowDetail extends TmdbSearchResult {
   number_of_episodes: number;
   episode_run_time: number[];
   status: string;
+  last_air_date: string;
   networks: { id: number; name: string }[];
   created_by: { name: string }[];
   seasons: { season_number: number; episode_count: number; air_date: string | null }[];
@@ -98,6 +99,8 @@ export interface ResolvedShow {
   autoTranslated: false;
   posterPath: string | null;
   firstAirDate: string;
+  /** Last air date; empty for shows that have not aired yet. Displayed as the end year only for ended shows. */
+  lastAirDate: string;
   /** TMDB community rating (0–10); shown as ★ on rail cards. */
   voteAverage: number;
   genres: string[];
@@ -108,6 +111,7 @@ export interface ResolvedShow {
   status: string | null;
   /** Seasons excluding season 0 (specials). */
   numberOfSeasons: number | null;
+  /** Episodes excluding season 0 (specials). */
   numberOfEpisodes: number | null;
   episodeRunTime: number[] | null;
   /** Display-only providers; never a filter (spec §3). */
@@ -321,6 +325,7 @@ export function resolveDetail(
     autoTranslated: false,
     posterPath: detail.poster_path,
     firstAirDate: detail.first_air_date,
+    lastAirDate: detail.last_air_date ?? '',
     voteAverage: detail.vote_average ?? 0,
     genres: detail.genres.map((g) => g.name),
     genreIds: detail.genres.map((g) => g.id),
@@ -328,7 +333,7 @@ export function resolveDetail(
     originLabel: override?.origin_label ?? detail.networks[0]?.name ?? null,
     status: detail.status,
     numberOfSeasons: displaySeasons(detail.seasons, detail.number_of_seasons),
-    numberOfEpisodes: detail.number_of_episodes,
+    numberOfEpisodes: displayEpisodes(detail.seasons, detail.number_of_episodes),
     episodeRunTime: detail.episode_run_time,
     providers,
   };

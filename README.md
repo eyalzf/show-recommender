@@ -37,22 +37,29 @@ Works end-to-end once deployed (with D1 bound + the TMDB secret set):
   language hard filter, per-profile authorization on every route.
 - Bootstrap: live-filtering TMDB search, 5 ratings incl. ≥1 negative +
   a free-text note, all persisted to the raw feedback log.
-- Taste: living summary in three sections (Shared / Casual / Deep
-  focus — free-text notes routed by the consolidation LLM, ratings
-  always Shared, ambiguous notes default to Shared), per-section
-  view/edit, contradiction flow scoped per section (accept merge /
-  replace / keep old), continuous like/dislike notes,
+- Preferences (formerly "Taste"): living summary in three sections
+  (Shared / Casual / Deep focus — free-text notes routed by the
+  consolidation LLM, ratings always Shared, ambiguous notes default to
+  Shared), per-section view/edit, contradiction flow scoped per section
+  (accept merge / replace / keep old), continuous like/dislike notes,
   language-conflict detection with an offer to add the language.
-- Lists: engine-generated Top 10 casual + Top 10 deep-focus with
-  rationales, Remove/Rate quick actions, event-driven refresh (any
-  feedback/note/rec/language change invalidates the stored lists) plus
-  manual refresh. Fewer than 10 shown with a reason, never padded.
-- External recommendations: personal (multi-name, auto-fill) + generic,
-  inbox with outcomes, people ranking from simple counts.
+- Recommendations (formerly "Lists"): engine-generated Top 10 casual +
+  Top 10 deep-focus with rationales, Remove/Rate quick actions,
+  event-driven refresh (any feedback/note/rec/language change
+  invalidates the stored lists) plus manual refresh. Fewer than 10
+  shown with a reason, never padded. Rail cards show years played
+  (open-ended when running), seasons, and episodes (season 0 excluded).
+- Tips (formerly "Recommendations"): outside recommendations, personal
+  (multi-name, auto-fill) + generic, inbox with outcomes, people
+  ranking from simple counts.
 - Ad-hoc: one embedding-matched pick + LLM rationale, independent of
-  taste and lists.
-- Taste consolidation (`/api/taste/consolidate`) via Workers AI,
-  prompted with user-authored text only (see the terms guardrail below).
+  taste and lists. Reached from the Recommendations screen (no top-nav
+  item).
+- Taste consolidation runs event-driven: every feedback/note write
+  re-consolidates in the background (waitUntil), and reading the
+  Preferences screen self-heals a missing summary the same way. The
+  manual route (`/api/taste/consolidate`) remains for explicit re-runs.
+  Prompts use user-authored text only (see the terms guardrail below).
 
 Stubbed / pending:
 
@@ -95,6 +102,11 @@ Retrieval, then LLM re-rank:
    bucket's pool; backfilled candidates surface only if the re-rank
    accepts them. Ids are validated against the offered set: the model
    can never invent a show.
+   Diversity caps (genre-ID clusters, see `clusterFor`): at most 3
+   shows per cluster per Top 10, and at most 12 per cluster in the rank
+   pool. Both caps relax on narrow pools — deferred candidates fill
+   slots no uncapped alternative can fill — so lists are never padded
+   with junk to look varied.
 5. Finalists are enriched through the 180-day metadata cache; the ranked
    pool (up to 30) and the Top 10 snapshot are stored per profile.
 
