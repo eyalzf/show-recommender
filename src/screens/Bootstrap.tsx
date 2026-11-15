@@ -32,6 +32,8 @@ export function Bootstrap({ lang, profile, onDone }: Props) {
   const [rated, setRated] = useState<Rated[]>([]);
   const [note, setNote] = useState('');
   const [ratingTarget, setRatingTarget] = useState<SearchHit | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -75,6 +77,31 @@ export function Bootstrap({ lang, profile, onDone }: Props) {
       return [...rest, { hit: ratingTarget, rating, reason }];
     });
     setRatingTarget(null);
+  };
+
+  /** Persist every rating + the taste note, then build the lists. */
+  const buildLists = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      for (const r of rated) {
+        await api.feedback(profile.id, r.hit.tmdbId, r.rating, r.reason, r.hit.title, r.hit.originalLanguage);
+      }
+      await api.addNote(profile.id, 'note', note.trim());
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'database_not_configured') {
+        // Demo mode: nothing persists, but the flow still continues.
+        setSaveError(t(lang, 'notSaved'));
+        setSaving(false);
+        onDone();
+        return;
+      }
+      setSaveError(t(lang, 'searchError'));
+      setSaving(false);
+      return;
+    }
+    setSaving(false);
+    onDone();
   };
 
   return (
@@ -131,9 +158,10 @@ export function Bootstrap({ lang, profile, onDone }: Props) {
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} />
       </label>
 
-      <button type="button" className="btn btn-primary" disabled={!reached} onClick={onDone}>
-        {t(lang, 'bootstrapBuild')}
+      <button type="button" className="btn btn-primary" disabled={!reached || saving} onClick={buildLists}>
+        {saving ? t(lang, 'bootstrapSaving') : t(lang, 'bootstrapBuild')}
       </button>
+      {saveError ? <p className="error-note" role="alert">{saveError}</p> : null}
 
       {ratingTarget ? (
         <RatingDialog

@@ -96,6 +96,7 @@ textarea { resize: vertical; }
   margin-bottom: 12px;
 }
 .card-rank { font-size: 1.6rem; font-weight: 700; color: var(--accent); min-width: 2ch; }
+.card-poster { border-radius: 6px; object-fit: cover; align-self: flex-start; }
 .card-body { flex: 1; min-width: 0; }
 .card-title { margin: 0 0 8px; font-size: 1.1rem; }
 .rationale { margin: 8px 0; }
@@ -175,6 +176,13 @@ textarea { resize: vertical; }
 
 .inbox, .ranking { padding-inline-start: 20px; }
 .inbox li, .ranking li { margin-bottom: 6px; }
+
+.profile-icon-img { border-radius: 50%; object-fit: cover; }
+.create-profile {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px; margin: 16px 0;
+}
+.create-profile h3 { margin: 14px 0 6px; }
 
 .footer {
   margin-top: 36px; padding-top: 14px;

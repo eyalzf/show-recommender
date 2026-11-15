@@ -29,13 +29,17 @@ export function Recommendations({ lang, profile }: Props) {
   const [stub, setStub] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = () => {
     api.recommendations(profile.id).then((res) => {
       setInbox(res.inbox);
       setRanking(res.peopleRanking);
       setKnownNames(res.knownNames);
       setStub(Boolean(res.stub));
     });
+  };
+
+  useEffect(() => {
+    load();
   }, [profile.id]);
 
   const save = async () => {
@@ -47,6 +51,7 @@ export function Recommendations({ lang, profile }: Props) {
       setNames(['']);
       setNote('');
       setNotice(null);
+      load();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
         setNotice(t(lang, 'notSaved'));

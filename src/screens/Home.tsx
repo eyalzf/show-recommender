@@ -21,27 +21,45 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
   const [casual, setCasual] = useState<ListItem[]>([]);
   const [deep, setDeep] = useState<ListItem[]>([]);
   const [stub, setStub] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  const [shortReason, setShortReason] = useState<string | null>(null);
+  const [casualReason, setCasualReason] = useState<string | null>(null);
+  const [deepReason, setDeepReason] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [rateTarget, setRateTarget] = useState<ListItem | null>(null);
   const [removeTarget, setRemoveTarget] = useState<ListItem | null>(null);
 
-  const load = useCallback(() => {
-    api
-      .lists(profile.id)
-      .then((res) => {
-        setCasual(res.casual);
-        setDeep(res.deep);
-        setStub(Boolean(res.stub));
-        setUpdatedAt(res.updatedAt);
-        setShortReason(res.shortReason);
-      })
-      .catch(() => setNotice(t(lang, 'searchError')));
-  }, [profile.id, lang]);
+  const load = useCallback(
+    (forceRefresh = false) => {
+      setGenerating(forceRefresh);
+      setNotice(null);
+      api
+        .lists(profile.id, lang, forceRefresh)
+        .then((res) => {
+          setCasual(res.casual);
+          setDeep(res.deep);
+          setStub(Boolean(res.stub));
+          setStale(Boolean(res.stale));
+          setUpdatedAt(res.updatedAt);
+          setCasualReason(res.casualShortReason ?? res.shortReason);
+          setDeepReason(res.deepShortReason ?? res.shortReason);
+          if (res.stale) setNotice(t(lang, 'listsStale'));
+        })
+        .catch((err: unknown) => {
+          setNotice(
+            err instanceof ApiError && err.code === 'tmdb_not_configured'
+              ? t(lang, 'tmdbMissing')
+              : t(lang, 'engineFailed'),
+          );
+        })
+        .finally(() => setGenerating(false));
+    },
+    [profile.id, lang],
+  );
 
   useEffect(() => {
-    load();
+    load(false);
   }, [load]);
 
   const dropFromLists = (tmdbId: number) => {
@@ -67,7 +85,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
     const target = rateTarget;
     setRateTarget(null);
     dropFromLists(target.tmdbId);
-    void persist(() => api.feedback(profile.id, target.tmdbId, rating, reason));
+    void persist(() => api.feedback(profile.id, target.tmdbId, rating, reason, target.title));
   };
 
   const submitRemoveDislike = (reason: string) => {
@@ -75,7 +93,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
     const target = removeTarget;
     setRemoveTarget(null);
     dropFromLists(target.tmdbId);
-    void persist(() => api.feedback(profile.id, target.tmdbId, 'disliked', reason));
+    void persist(() => api.feedback(profile.id, target.tmdbId, 'disliked', reason, target.title));
   };
 
   const submitRemoveNoReason = () => {
@@ -86,10 +104,10 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
     void persist(() => api.deny(profile.id, target.tmdbId));
   };
 
-  const renderList = (title: string, items: ListItem[]) => (
+  const renderList = (title: string, items: ListItem[], reason: string | null) => (
     <section>
       <h2>{title}</h2>
-      {items.length === 0 ? <p>{shortReason ?? t(lang, 'shortListReason')}</p> : null}
+      {items.length === 0 ? <p>{reason ?? t(lang, 'shortListReason')}</p> : null}
       {items.map((item) => (
         <ShowCard
           key={`${title}-${item.tmdbId}-${item.rank}`}
@@ -109,12 +127,13 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
       {notice ? <p className="notice" role="status">{notice}</p> : null}
       <p>
         {t(lang, 'updated')}: {updatedAt ?? t(lang, 'neverUpdated')}{' '}
-        <button type="button" className="btn btn-ghost" onClick={load}>
+        <button type="button" className="btn btn-ghost" onClick={() => load(true)} disabled={generating}>
           {t(lang, 'refresh')}
         </button>
       </p>
-      {renderList(t(lang, 'casualTitle'), casual)}
-      {renderList(t(lang, 'deepTitle'), deep)}
+      {generating ? <p>{t(lang, 'listsGenerating')}</p> : null}
+      {renderList(t(lang, 'casualTitle'), casual, casualReason)}
+      {renderList(t(lang, 'deepTitle'), deep, deepReason)}
       <button type="button" className="btn" onClick={onAdhoc}>
         {t(lang, 'askAdhoc')}
       </button>

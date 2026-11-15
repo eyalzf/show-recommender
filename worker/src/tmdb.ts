@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import type { Env } from './env';
+import { displaySeasons } from './util';
 
 /**
  * Server-side TMDB client (api.themoviedb.org/3, Bearer token from the
@@ -9,10 +10,12 @@ import type { Env } from './env';
  *  - §1.C forbids using TMDB APIs/Content "in connection with, including
  *    for training, a machine learning (ML) or artificial intelligence (AI)
  *    based Application". This app's LLM layer therefore NEVER receives
- *    TMDB content: prompts are built from user-authored taste text and show
- *    titles/IDs only. See llm.ts. This is a terms-reading, not legal advice;
- *    the scope of "AI based Application" is ambiguous and needs a product
- *    decision before the LLM features go beyond taste consolidation.
+ *    TMDB content: prompts are built from user-authored taste text and
+ *    show titles/IDs plus factual labels (genre names, year, language,
+ *    runtime, season counts) only — never overviews or descriptions.
+ *    See llm.ts. This is a terms-reading, not legal advice; the scope of
+ *    "AI based Application" is ambiguous and needs a product decision
+ *    before the LLM features go beyond taste consolidation + ranking.
  *  - §1.C also forbids caching TMDB data "for longer than 6 months". The
  *    metadata cache below enforces a 180-day TTL, well inside that limit.
  *  - Attribution (footer + logo) is a license condition; see the frontend
@@ -23,6 +26,18 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 
 /** Cache TTL for TMDB metadata: 180 days (terms cap is 6 months). */
 export const TMDB_CACHE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+
+/**
+ * Defense-in-depth blocklist for the verified Zagouri duplicate entries
+ * (TMDB API check 2026-11-15). The curated_overrides `excluded` flag is
+ * the real mechanism; this constant keeps the duplicates out even if the
+ * seed migration was never applied. Canonical entry is 75547.
+ */
+export const BLOCKED_TMDB_IDS = new Set([290353, 68885]);
+
+export function isBlockedId(tmdbId: number): boolean {
+  return BLOCKED_TMDB_IDS.has(tmdbId);
+}
 
 export class TmdbNotConfiguredError extends Error {
   readonly status = 503;
@@ -57,6 +72,7 @@ export interface TmdbSearchResult {
   origin_country: string[];
   popularity: number;
   vote_average: number;
+  vote_count: number;
 }
 
 export interface TmdbShowDetail extends TmdbSearchResult {
@@ -83,10 +99,12 @@ export interface ResolvedShow {
   posterPath: string | null;
   firstAirDate: string;
   genres: string[];
+  genreIds: number[];
   originCountry: string[];
   /** Canonical origin label, e.g. "Kan 11 original" (override table wins). */
   originLabel: string | null;
   status: string | null;
+  /** Seasons excluding season 0 (specials). */
   numberOfSeasons: number | null;
   numberOfEpisodes: number | null;
   episodeRunTime: number[] | null;
@@ -135,25 +153,84 @@ export async function searchShows(
     page: String(page),
     include_adult: 'false',
   });
-  return data.results ?? [];
+  return (data.results ?? []).filter((r) => !isBlockedId(r.id));
+}
+
+export interface DiscoverOptions {
+  /** Original-language codes; empty = no language restriction. */
+  languages?: string[];
+  genreIds?: number[];
+  sortBy?: string;
+  page?: number;
+  minVoteCount?: number;
 }
 
 /**
- * Popular-show discovery for the ad-hoc flow (milestone 1 seed list).
- * Language filtering by profile happens in milestone 2; this returns
- * popular titles and the caller picks from them.
+ * Discover TV shows with the profile's hard language filter applied at
+ * the API level (with_original_language ORs with `|`).
  */
 export async function discoverShows(
   c: Context<{ Bindings: Env }>,
   uiLang: string,
+  opts: DiscoverOptions = {},
 ): Promise<TmdbSearchResult[]> {
-  const data = await tmdbFetch<{ results: TmdbSearchResult[] }>(c, '/discover/tv', {
+  const params: Record<string, string> = {
     language: tmdbLanguage(uiLang),
-    sort_by: 'popularity.desc',
+    sort_by: opts.sortBy ?? 'popularity.desc',
     include_adult: 'false',
+    page: String(opts.page ?? 1),
+  };
+  if (opts.languages && opts.languages.length > 0) {
+    params['with_original_language'] = opts.languages.join('|');
+  }
+  if (opts.genreIds && opts.genreIds.length > 0) {
+    params['with_genres'] = opts.genreIds.join(',');
+  }
+  if (opts.minVoteCount != null) {
+    params['vote_count.gte'] = String(opts.minVoteCount);
+  }
+  const data = await tmdbFetch<{ results: TmdbSearchResult[] }>(c, '/discover/tv', params);
+  return (data.results ?? []).filter((r) => !isBlockedId(r.id));
+}
+
+/** Trending TV this week (freshness pool for the engine). */
+export async function getTrending(
+  c: Context<{ Bindings: Env }>,
+  uiLang: string,
+): Promise<TmdbSearchResult[]> {
+  const data = await tmdbFetch<{ results: TmdbSearchResult[] }>(c, '/trending/tv/week', {
+    language: tmdbLanguage(uiLang),
+  });
+  return (data.results ?? []).filter((r) => !isBlockedId(r.id));
+}
+
+/** TMDB's own recommendations for a show ("more like this" anchor). */
+export async function getShowRecommendations(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+): Promise<TmdbSearchResult[]> {
+  const data = await tmdbFetch<{ results: TmdbSearchResult[] }>(c, `/tv/${tmdbId}/recommendations`, {
+    language: tmdbLanguage(uiLang),
     page: '1',
   });
-  return data.results ?? [];
+  return (data.results ?? []).filter((r) => !isBlockedId(r.id));
+}
+
+// Genre id -> name map, cached per isolate (the list barely changes).
+let genreCache: { at: number; map: Map<number, string> } | null = null;
+
+export async function getGenreMap(
+  c: Context<{ Bindings: Env }>,
+  uiLang: string,
+): Promise<Map<number, string>> {
+  if (genreCache && Date.now() - genreCache.at < 24 * 60 * 60 * 1000) return genreCache.map;
+  const data = await tmdbFetch<{ genres: { id: number; name: string }[] }>(c, '/genre/tv/list', {
+    language: tmdbLanguage(uiLang),
+  });
+  const map = new Map((data.genres ?? []).map((g) => [g.id, g.name]));
+  genreCache = { at: Date.now(), map };
+  return map;
 }
 
 interface OverrideRow {
@@ -177,17 +254,46 @@ async function readOverride(
     .first<OverrideRow>();
 }
 
-/** Fetch a show's detail and resolve it through the TMDB -> override chain. */
-export async function getShow(
+/** Raw detail fetch (no override merge, no providers). */
+export async function getShowDetailRaw(
   c: Context<{ Bindings: Env }>,
   tmdbId: number,
   uiLang: string,
-): Promise<ResolvedShow> {
-  const detail = await tmdbFetch<TmdbShowDetail>(c, `/tv/${tmdbId}`, {
+): Promise<TmdbShowDetail> {
+  return await tmdbFetch<TmdbShowDetail>(c, `/tv/${tmdbId}`, {
     language: tmdbLanguage(uiLang),
   });
-  const override = await readOverride(c, tmdbId);
+}
 
+/** IL watch providers for a show, display-only. Empty when TMDB has none. */
+export async function getWatchProviders(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+): Promise<string[]> {
+  try {
+    const data = await tmdbFetch<{
+      results?: Record<string, { flatrate?: { provider_name: string }[]; rent?: { provider_name: string }[]; buy?: { provider_name: string }[]; free?: { provider_name: string }[]; ads?: { provider_name: string }[] }>;
+    }>(c, `/tv/${tmdbId}/watch/providers`, {});
+    const il = data.results?.['IL'];
+    if (!il) return [];
+    const names = new Set<string>();
+    for (const kind of ['flatrate', 'free', 'ads', 'rent', 'buy'] as const) {
+      for (const p of il[kind] ?? []) names.add(p.provider_name);
+    }
+    return [...names];
+  } catch {
+    // Providers are display-only; a failure must not break the detail page.
+    return [];
+  }
+}
+
+/** Merge raw detail through the TMDB -> override chain. */
+export function resolveDetail(
+  detail: TmdbShowDetail,
+  override: OverrideRow | null,
+  uiLang: string,
+  providers: string[],
+): ResolvedShow {
   let title = detail.name;
   let overview = detail.overview;
   let source: ResolvedShow['source'] = 'tmdb';
@@ -197,7 +303,9 @@ export async function getShow(
     if (override.he_overview) overview = override.he_overview;
     if (override.he_title || override.he_overview) source = 'override';
   }
-
+  if (override?.providers_note) {
+    providers = [override.providers_note, ...providers];
+  }
   return {
     tmdbId: detail.id,
     title,
@@ -209,14 +317,29 @@ export async function getShow(
     posterPath: detail.poster_path,
     firstAirDate: detail.first_air_date,
     genres: detail.genres.map((g) => g.name),
+    genreIds: detail.genres.map((g) => g.id),
     originCountry: detail.origin_country,
     originLabel: override?.origin_label ?? detail.networks[0]?.name ?? null,
     status: detail.status,
-    numberOfSeasons: detail.number_of_seasons,
+    numberOfSeasons: displaySeasons(detail.seasons, detail.number_of_seasons),
     numberOfEpisodes: detail.number_of_episodes,
     episodeRunTime: detail.episode_run_time,
-    providers: override?.providers_note ? [override.providers_note] : [],
+    providers,
   };
+}
+
+/** Fetch a show's detail and resolve it through the TMDB -> override chain. */
+export async function getShow(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+): Promise<ResolvedShow> {
+  const [detail, override, providers] = await Promise.all([
+    getShowDetailRaw(c, tmdbId, uiLang),
+    readOverride(c, tmdbId),
+    getWatchProviders(c, tmdbId),
+  ]);
+  return resolveDetail(detail, override, uiLang, providers);
 }
 
 /**
@@ -263,4 +386,22 @@ export async function putCachedShowPayload(
     )
     .bind(tmdbId, tmdbLanguage(uiLang), JSON.stringify(payload), Date.now())
     .run();
+}
+
+/**
+ * Detail fetch with the read-through cache. Used by the engine for
+ * finalist enrichment so repeat generations don't re-fetch TMDB.
+ */
+export async function getShowDetailCached(
+  c: Context<{ Bindings: Env }>,
+  tmdbId: number,
+  uiLang: string,
+): Promise<TmdbShowDetail> {
+  const cached = await getCachedShowPayload(c, tmdbId, uiLang);
+  if (cached && typeof cached['id'] === 'number') {
+    return cached as unknown as TmdbShowDetail;
+  }
+  const detail = await getShowDetailRaw(c, tmdbId, uiLang);
+  await putCachedShowPayload(c, tmdbId, uiLang, detail);
+  return detail;
 }

@@ -25,6 +25,8 @@ export function AdHoc({ lang, profile, onOpenShow }: Props) {
     title: string;
     originalLanguage: string;
     firstAirDate: string;
+    posterPath: string | null;
+    genres: string[];
     rationale: string;
   } | null>(null);
   const [history, setHistory] = useState<{ query: string; title: string }[]>([]);
@@ -64,6 +66,16 @@ export function AdHoc({ lang, profile, onOpenShow }: Props) {
       {error ? <p className="error-note" role="alert">{error}</p> : null}
       {result ? (
         <article className="card">
+          {result.posterPath ? (
+            <img
+              className="card-poster"
+              src={`https://image.tmdb.org/t/p/w185${result.posterPath}`}
+              alt=""
+              width="62"
+              height="93"
+              loading="lazy"
+            />
+          ) : null}
           <div className="card-body">
             <h3 className="card-title">
               <button type="button" className="linklike" onClick={() => onOpenShow(result.tmdbId)}>
@@ -72,6 +84,9 @@ export function AdHoc({ lang, profile, onOpenShow }: Props) {
             </h3>
             <div className="chips">
               <span className="chip">{result.originalLanguage}</span>
+              {result.genres.map((g) => (
+                <span key={g} className="chip">{g}</span>
+              ))}
               {result.firstAirDate ? <span className="chip">{result.firstAirDate.slice(0, 4)}</span> : null}
             </div>
             <p className="rationale">{result.rationale}</p>

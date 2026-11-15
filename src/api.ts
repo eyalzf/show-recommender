@@ -17,6 +17,27 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+export interface TasteResponse {
+  stub?: boolean;
+  summary: string;
+  summaryLanguage: string;
+  notes: { id: string; kind: string; text: string; createdAt: number }[];
+  contradiction: { oldText: string; newText: string; proposedMerge: string } | null;
+  languageConflict: { praisedLanguage: string; languageCode?: string; message: string } | null;
+  profile?: Profile;
+}
+
+export interface ListsResponse {
+  stub?: boolean;
+  stale?: boolean;
+  updatedAt: string | null;
+  casual: ListItem[];
+  deep: ListItem[];
+  shortReason: string | null;
+  casualShortReason: string | null;
+  deepShortReason: string | null;
+}
+
 export const api = {
   health: () => req<{ ok: boolean; dbBound: boolean; aiBound: boolean; tmdbConfigured: boolean }>('/api/health'),
 
@@ -28,15 +49,51 @@ export const api = {
 
   profiles: () => req<{ profiles: Profile[]; stub?: boolean }>('/api/profiles'),
 
-  lists: (profileId: string) =>
-    req<{ stub?: boolean; updatedAt: string | null; casual: ListItem[]; deep: ListItem[]; shortReason: string | null }>(
-      `/api/lists?profileId=${encodeURIComponent(profileId)}`,
+  createProfile: (name: string, languages: string[], uiLanguage: UiLang, iconKind: string, iconRef: string | null) =>
+    req<{ profile: Profile }>('/api/profiles', {
+      method: 'POST',
+      body: JSON.stringify({ name, languages, uiLanguage, iconKind, iconRef }),
+    }),
+
+  updateProfile: (profileId: string, patch: Partial<Pick<Profile, 'name' | 'languages' | 'uiLanguage' | 'iconKind' | 'iconRef'>>) =>
+    req<{ profile: Profile }>(`/api/profiles/${encodeURIComponent(profileId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  uploadIcon: async (profileId: string, file: File): Promise<{ ok: true; iconRef: string }> => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`/api/profiles/${encodeURIComponent(profileId)}/icon`, {
+      method: 'POST',
+      body: form,
+    });
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      throw new ApiError(
+        String(body['error'] ?? 'request_failed'),
+        String(body['message'] ?? `Request failed (HTTP ${res.status})`),
+        res.status,
+      );
+    }
+    return body as { ok: true; iconRef: string };
+  },
+
+  lists: (profileId: string, lang: UiLang, refresh = false) =>
+    req<ListsResponse>(
+      `/api/lists?profileId=${encodeURIComponent(profileId)}&lang=${lang}${refresh ? '&refresh=1' : ''}`,
     ),
 
-  feedback: (profileId: string, tmdbId: number, rating: string, reason: string) =>
+  refreshLists: (profileId: string, lang: UiLang) =>
+    req<ListsResponse>('/api/lists/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ profileId, lang }),
+    }),
+
+  feedback: (profileId: string, tmdbId: number, rating: string, reason: string, showTitle?: string, originalLanguage?: string) =>
     req<{ ok: true }>('/api/feedback', {
       method: 'POST',
-      body: JSON.stringify({ profileId, tmdbId, rating, reason }),
+      body: JSON.stringify({ profileId, tmdbId, rating, reason, showTitle, originalLanguage }),
     }),
 
   deny: (profileId: string, tmdbId: number) =>
@@ -45,19 +102,29 @@ export const api = {
       body: JSON.stringify({ profileId, tmdbId }),
     }),
 
+  addNote: (profileId: string, kind: 'like' | 'dislike' | 'note', text: string) =>
+    req<{ ok: true }>('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ profileId, kind, text }),
+    }),
+
   taste: (profileId: string, lang: UiLang) =>
-    req<{
-      stub?: boolean;
-      summary: string;
-      summaryLanguage: string;
-      notes: { id: string; kind: string; text: string; createdAt: number }[];
-      contradiction: { oldText: string; newText: string; proposedMerge: string } | null;
-      languageConflict: { praisedLanguage: string; message: string } | null;
-      profile?: Profile;
-    }>(`/api/taste?profileId=${encodeURIComponent(profileId)}&lang=${lang}`),
+    req<TasteResponse>(`/api/taste?profileId=${encodeURIComponent(profileId)}&lang=${lang}`),
+
+  updateTaste: (profileId: string, lang: UiLang, summary: string) =>
+    req<{ ok: true }>('/api/taste', {
+      method: 'PUT',
+      body: JSON.stringify({ profileId, lang, summary }),
+    }),
 
   consolidate: (profileId: string, lang: UiLang) =>
-    req<{ summary: string; provider: string; stub?: boolean }>('/api/taste/consolidate', {
+    req<{
+      summary: string;
+      contradictions: { oldText: string; newText: string; proposedMerge: string }[];
+      languageConflict: { languageCode: string; languageName: string; message?: string } | null;
+      provider: string;
+      stub?: boolean;
+    }>('/api/taste/consolidate', {
       method: 'POST',
       body: JSON.stringify({ profileId, lang }),
     }),
@@ -77,7 +144,7 @@ export const api = {
     }),
 
   adhoc: (profileId: string, query: string, lang: UiLang) =>
-    req<{ result: { tmdbId: number; title: string; originalLanguage: string; firstAirDate: string; rationale: string }; provider: string }>(
+    req<{ result: { tmdbId: number; title: string; originalLanguage: string; firstAirDate: string; posterPath: string | null; genres: string[]; rationale: string }; provider: string }>(
       '/api/adhoc',
       { method: 'POST', body: JSON.stringify({ profileId, query, lang }) },
     ),

@@ -35,6 +35,10 @@ export function App() {
   }, [lang]);
 
   useEffect(() => {
+    loadProfiles();
+  }, []);
+
+  const loadProfiles = () => {
     api
       .profiles()
       .then((res) => {
@@ -42,7 +46,12 @@ export function App() {
         setProfilesStub(Boolean(res.stub));
       })
       .catch(() => setProfiles([]));
-  }, []);
+  };
+
+  const handleProfileChanged = (updated: Profile) => {
+    setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    setActiveProfile((prev) => (prev && prev.id === updated.id ? updated : prev));
+  };
 
   const openShow = (tmdbId: number) => {
     setDetailId(tmdbId);
@@ -116,7 +125,13 @@ export function App() {
 
       <main>
         {screen === 'picker' || !activeProfile ? (
-          <ProfilePicker lang={lang} profiles={profiles} stub={profilesStub} onSelect={switchProfile} />
+          <ProfilePicker
+            lang={lang}
+            profiles={profiles}
+            stub={profilesStub}
+            onSelect={switchProfile}
+            onProfilesChanged={loadProfiles}
+          />
         ) : screen === 'home' ? (
           <Home lang={lang} profile={activeProfile} onOpenShow={openShow} onAdhoc={() => setScreen('adhoc')} />
         ) : screen === 'bootstrap' ? (
@@ -124,7 +139,7 @@ export function App() {
         ) : screen === 'detail' && detailId != null ? (
           <ShowDetail lang={lang} profile={activeProfile} tmdbId={detailId} onBack={() => setScreen('home')} />
         ) : screen === 'taste' ? (
-          <TasteProfile lang={lang} profile={activeProfile} />
+          <TasteProfile lang={lang} profile={activeProfile} onProfileChanged={handleProfileChanged} />
         ) : screen === 'recommendations' ? (
           <Recommendations lang={lang} profile={activeProfile} />
         ) : (

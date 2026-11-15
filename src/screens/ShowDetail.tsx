@@ -23,6 +23,7 @@ export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
   const [rating, setRating] = useState<Rating>('liked');
   const [reason, setReason] = useState('');
   const [saved, setSaved] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -38,12 +39,16 @@ export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
   }, [tmdbId, lang]);
 
   const save = async () => {
+    if (!show) return;
     try {
-      await api.feedback(profile.id, tmdbId, rating, reason);
+      await api.feedback(profile.id, tmdbId, rating, reason, show.title, show.originalLanguage);
       setSaved(true);
+      setSaveNotice(null);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
-        setSaved(true);
+        setSaveNotice(t(lang, 'notSaved'));
+      } else {
+        setSaveNotice(t(lang, 'searchError'));
       }
     }
   };
@@ -67,6 +72,15 @@ export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
     <section>
       <button type="button" className="btn btn-ghost" onClick={onBack}>{t(lang, 'back')}</button>
       <h2>{show.title}</h2>
+      {show.posterPath ? (
+        <img
+          src={`https://image.tmdb.org/t/p/w185${show.posterPath}`}
+          alt=""
+          width="124"
+          height="186"
+          loading="lazy"
+        />
+      ) : null}
       {show.originalTitle !== show.title ? <p className="muted">{show.originalTitle}</p> : null}
       <div className="chips">
         {show.genres.map((g) => (
@@ -109,6 +123,7 @@ export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
         {t(lang, 'saveFeedback')}
       </button>
       {saved ? <p className="ok-note">{t(lang, 'save')}</p> : null}
+      {saveNotice ? <p className="notice" role="status">{saveNotice}</p> : null}
     </section>
   );
 }
