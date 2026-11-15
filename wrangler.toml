@@ -1,0 +1,35 @@
+# Show Recommender — Cloudflare Worker configuration.
+#
+# Deployments are currently done via the Cloudflare API (see README.md), not
+# `wrangler deploy`, because the API token in use cannot be handed to wrangler.
+# This file documents the bindings the Worker expects so a wrangler-based
+# deploy works once a token with the right scope is available.
+
+name = "show-recommender"
+main = "worker/bundle.js"
+compatibility_date = "2024-11-01"
+
+# D1 database. NOTE: creating the D1 database via the API was BLOCKED on
+# 2026-11-15 — the Cloudflare API token returned HTTP 401 "Authentication
+# error" (code 10000) for both creating and listing D1 databases, i.e. the
+# token has no D1 permission. Create the database (dashboard or a token with
+# D1:Edit), apply worker/migrations/*.sql, then replace the placeholder
+# database_id below with the real id and redeploy.
+[[d1_databases]]
+binding = "DB"
+database_name = "show-recommender"
+database_id = "REPLACE-ME-AFTER-D1-CREATION"
+
+# R2 bucket for profile icons/images. Bucket `show-recommender` was created
+# via the API on 2026-11-15.
+[[r2_buckets]]
+binding = "PROFILE_ICONS"
+bucket_name = "show-recommender"
+
+# Workers AI (LLM layer). No resource to provision; the binding is enough.
+[ai]
+binding = "AI"
+
+# Secrets (set via the Cloudflare dashboard or API, never committed):
+#   TMDB_READ_TOKEN — TMDB API v4 read access token (Bearer). Until it is set,
+#   the /api/search and /api/shows/* routes return `tmdb_not_configured`.

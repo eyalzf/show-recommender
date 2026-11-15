@@ -1,0 +1,6 @@
+node_modules/
+dist/
+worker/bundle.js
+.wrangler/
+.DS_Store
+*.local

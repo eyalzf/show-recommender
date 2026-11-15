@@ -1,0 +1,30 @@
+-- Curated Israeli overrides — SEED PLACEHOLDER (migration 0002).
+--
+-- The 2026-11-15 verification found three known-gap titles that the
+-- override table must fix once their TMDB IDs are confirmed via the TMDB
+-- API check (spec §11, check 1). Do NOT seed rows by title guess: matching
+-- must use TMDB ID + year + cast (spec §4) because of remake collisions
+-- (Kvodo vs US "Your Honor", Guf Shlishi vs the film "Third Person").
+--
+-- Known gaps to seed after the API check:
+--   1. Guf Shlishi / גוף שלישי — no overview in ANY language on TheTVDB;
+--      needs a hand-written Hebrew overview + origin label (Keshet).
+--   2. On the Spectrum / על הספקטרום — likely missing from TheTVDB;
+--      Seret.co.il covers it (Hebrew logline, 30-min runtime, Yes) and is
+--      the hand-checked reference for this row.
+--   3. Srugim / סרוגים — original language wrongly listed as English on
+--      TheTVDB; needs an origin-language correction + origin label (Yes).
+--   4. Zagouri Empire — VERIFIED by the TMDB API check (2026-11-15,
+--      evidence: tv-recommender/verification/tmdb-api.md): THREE TMDB
+--      entries exist. The override table must pin 75547 ("Zaguri Empire",
+--      carries IMDb/TVDB/Wikidata join keys) as canonical and exclude
+--      290353 (current episode counts but no join IDs) and 68885 (bad
+--      duplicate, original language "en") from search results.
+--
+-- Template (fill in real tmdb_id values only):
+-- INSERT INTO curated_overrides (tmdb_id, he_title, he_overview, origin_label, providers_note, notes, updated_at)
+-- VALUES (0, NULL, NULL, NULL, NULL, 'seeded after TMDB API check', unixepoch() * 1000);
+--
+-- Intentionally a no-op migration: it documents the seed contract without
+-- writing unverified data.
+SELECT 1;
