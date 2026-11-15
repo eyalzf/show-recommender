@@ -87,11 +87,14 @@ Retrieval, then LLM re-rank:
    multilingual) of the taste summary against title + genre text —
    never overviews — plus popularity, votes, similar-show and
    external-rec boosts, and genre overlap with likes.
-4. Split into casual / deep-focus by a genre heuristic (see
-   `worker/src/util.ts`), then Llama 3.3 70B re-ranks up to 30 per kind
-   into the Top 10 with a rationale each — each kind's prompt gets the
-   Shared taste section plus its own section. Ids are validated against
-   the offered set: the model can never invent a show.
+4. Split into casual / deep-focus by a genre-ID heuristic (IDs, never
+   localized genre names — see `worker/src/util.ts`), then Llama 3.3 70B
+   re-ranks up to 30 per kind into the Top 10 with a rationale each —
+   each kind's prompt gets the Shared taste section plus its own
+   section. A bucket the heuristic starves is backfilled from the other
+   bucket's pool; backfilled candidates surface only if the re-rank
+   accepts them. Ids are validated against the offered set: the model
+   can never invent a show.
 5. Finalists are enriched through the 180-day metadata cache; the ranked
    pool (up to 30) and the Top 10 snapshot are stored per profile.
 
@@ -101,7 +104,7 @@ Known v1 limitations:
   subrequests + 2 LLM calls; can take up to a minute). If wall-clock
   limits bite, move generation behind `waitUntil` + polling.
 - Classification (kind/type/tone/pace/structure) is heuristic from
-  genres + runtime; tune from real usage.
+  genre IDs + runtime; tune from real usage.
 - The embedding model degrades silently to non-embedding signals when
   the AI binding is absent or the call fails.
 - List snapshots store the rationale language of the generating UI

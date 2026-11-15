@@ -23,6 +23,8 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
   const [stub, setStub] = useState(false);
   const [stale, setStale] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [casualReason, setCasualReason] = useState<string | null>(null);
   const [deepReason, setDeepReason] = useState<string | null>(null);
@@ -32,7 +34,11 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
 
   const load = useCallback(
     (forceRefresh = false) => {
-      setGenerating(forceRefresh);
+      // Generation is one call producing both lists, so both sections
+      // show the building state until it resolves — including the
+      // first-ever generation after onboarding completes.
+      setGenerating(true);
+      setLoadFailed(false);
       setNotice(null);
       api
         .lists(profile.id, lang, forceRefresh)
@@ -42,18 +48,22 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
           setStub(Boolean(res.stub));
           setStale(Boolean(res.stale));
           setUpdatedAt(res.updatedAt);
-          setCasualReason(res.casualShortReason ?? res.shortReason);
-          setDeepReason(res.deepShortReason ?? res.shortReason);
+          setCasualReason(res.casualShortReason);
+          setDeepReason(res.deepShortReason);
           if (res.stale) setNotice(t(lang, 'listsStale'));
         })
         .catch((err: unknown) => {
+          setLoadFailed(true);
           setNotice(
             err instanceof ApiError && err.code === 'tmdb_not_configured'
               ? t(lang, 'tmdbMissing')
               : t(lang, 'engineFailed'),
           );
         })
-        .finally(() => setGenerating(false));
+        .finally(() => {
+          setGenerating(false);
+          setHasLoaded(true);
+        });
     },
     [profile.id, lang],
   );
@@ -104,6 +114,27 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
     void persist(() => api.deny(profile.id, target.tmdbId));
   };
 
+  const renderBuilding = () => (
+    <div role="status" aria-live="polite">
+      <p className="building-line">
+        <span className="spinner" aria-hidden="true" />
+        {t(lang, 'listsGenerating')}
+      </p>
+      <div className="list-grid" aria-hidden="true">
+        {[0, 1, 2].map((i) => (
+          <div className="skeleton-card" key={i}>
+            <div className="skeleton-poster" />
+            <div className="skeleton-body">
+              <div className="skeleton-bar skeleton-bar-title" />
+              <div className="skeleton-bar" />
+              <div className="skeleton-bar skeleton-bar-short" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
   const renderList = (title: string, subEn: string, items: ListItem[], reason: string | null) => (
     <section className="list-section">
       <div className="section-head">
@@ -111,21 +142,38 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
         {lang === 'he' ? <div className="section-sub">{subEn}</div> : null}
         <div className="hairline" aria-hidden="true" />
       </div>
-      {items.length === 0 ? (
-        <p>{reason ?? t(lang, 'shortListReason')}</p>
+      {generating && items.length === 0 ? (
+        renderBuilding()
+      ) : items.length === 0 ? (
+        // On a failed load the error notice + retry above explains the
+        // empty section; never show the generic short-list fallback.
+        loadFailed ? null : (
+          <p>{reason ?? t(lang, 'shortListReason')}</p>
+        )
       ) : (
-        <div className="list-grid">
-          {items.map((item) => (
-            <ShowCard
-              key={`${title}-${item.tmdbId}-${item.rank}`}
-              item={item}
-              lang={lang}
-              onRemove={setRemoveTarget}
-              onRate={setRateTarget}
-              onOpen={(i) => onOpenShow(i.tmdbId)}
-            />
-          ))}
-        </div>
+        <>
+          {generating ? (
+            <p className="building-line" role="status">
+              <span className="spinner" aria-hidden="true" />
+              {t(lang, 'buildingList')}
+            </p>
+          ) : null}
+          <div className="list-grid">
+            {items.map((item) => (
+              <ShowCard
+                key={`${title}-${item.tmdbId}-${item.rank}`}
+                item={item}
+                lang={lang}
+                onRemove={setRemoveTarget}
+                onRate={setRateTarget}
+                onOpen={(i) => onOpenShow(i.tmdbId)}
+              />
+            ))}
+          </div>
+          {reason && items.length < 10 && !generating ? (
+            <p className="short-reason">{reason}</p>
+          ) : null}
+        </>
       )}
     </section>
   );
@@ -133,17 +181,25 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
   return (
     <div>
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
-      {notice ? <p className="notice" role="status">{notice}</p> : null}
+      {notice ? (
+        <p className="notice" role="status">
+          {notice}{' '}
+          {loadFailed ? (
+            <button type="button" className="btn btn-ghost" onClick={() => load(true)} disabled={generating}>
+              {t(lang, 'retry')}
+            </button>
+          ) : null}
+        </p>
+      ) : null}
       <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
-      <p>
-        {t(lang, 'updated')}: {updatedAt ?? t(lang, 'neverUpdated')}{' '}
+      {renderList(t(lang, 'casualTitle'), 'Casual Top 10', casual, casualReason)}
+      {renderList(t(lang, 'deepTitle'), 'Deep Focus Top 10', deep, deepReason)}
+      <p className="lists-meta">
+        {t(lang, 'updated')}: {hasLoaded ? (updatedAt ?? t(lang, 'neverUpdated')) : t(lang, 'loading')}{' '}
         <button type="button" className="btn btn-ghost" onClick={() => load(true)} disabled={generating}>
           {t(lang, 'refresh')}
         </button>
       </p>
-      {generating ? <p>{t(lang, 'listsGenerating')}</p> : null}
-      {renderList(t(lang, 'casualTitle'), 'Casual Top 10', casual, casualReason)}
-      {renderList(t(lang, 'deepTitle'), 'Deep Focus Top 10', deep, deepReason)}
       <button type="button" className="btn" onClick={onAdhoc}>
         {t(lang, 'askAdhoc')}
       </button>

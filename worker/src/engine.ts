@@ -44,11 +44,14 @@ import {
  *      against title+genre text (NEVER overviews), popularity, votes,
  *      similar-show and external-rec boosts, genre overlap with likes.
  *
- * Ranking splits candidates into casual / deep-focus by a genre
- * heuristic, then the LLM re-ranks up to 30 per kind into the Top 10
- * with a rationale each. Each kind's re-rank prompt gets the Shared
- * taste section plus its own section; retrieval embedding uses all
- * sections joined. Prompts contain user text + factual labels
+ * Ranking splits candidates into casual / deep-focus by a genre-ID
+ * heuristic (IDs, never localized genre names — see util.ts), then the
+ * LLM re-ranks up to 30 per kind into the Top 10 with a rationale each.
+ * A bucket the heuristic starves (fewer than 10 primaries) is backfilled
+ * from the other bucket's pool so the re-rank — not the heuristic —
+ * decides fit; backfilled candidates surface only if the LLM ranks
+ * them. Each kind's re-rank prompt gets the Shared taste section plus
+ * its own section; retrieval embedding uses all sections joined. Prompts contain user text + factual labels
  * only (see llm.ts terms guardrail). The ranked pool stays larger than
  * 10 so removals promote; fewer than 10 are shown with a reason, never
  * padded.
@@ -333,14 +336,22 @@ async function scoreCandidates(
   });
 }
 
+/**
+ * Re-rank one kind's candidates. `strictIds` are backfilled candidates
+ * borrowed from the other bucket: they surface ONLY if the LLM ranks
+ * them — the retrieval-order fill-up below never promotes them, so a
+ * starved bucket is never padded with shows the re-rank rejected.
+ * Returns the LLM's own short reason when it ranked fewer than 10.
+ */
 async function rankKind(
   c: Context<{ Bindings: Env }>,
   kind: 'casual' | 'deep',
   candidates: Candidate[],
+  strictIds: Set<number>,
   tasteText: string,
   uiLang: string,
-): Promise<RankedEntry[]> {
-  if (candidates.length === 0) return [];
+): Promise<{ ranked: RankedEntry[]; shortReason: string | null }> {
+  if (candidates.length === 0) return { ranked: [], shortReason: null };
   const provider = getLlmProvider(c.env);
   const fallbackRationale =
     uiLang === 'he' ? 'תואם את פרופיל הטעם.' : 'Matches your taste profile.';
@@ -369,19 +380,25 @@ async function rankKind(
         rationale: r.rationale || fallbackRationale,
       }));
       const rankedIds = new Set(ranked.map((r) => r.tmdbId));
-      // Fill up to the pool size from retrieval order (never invented).
+      // Fill up to the pool size from retrieval order (never invented),
+      // except backfilled candidates the LLM did not rank.
       for (const cand of candidates) {
         if (ranked.length >= RANK_POOL_SIZE) break;
-        if (!rankedIds.has(cand.tmdbId)) {
-          ranked.push({ tmdbId: cand.tmdbId, rationale: fallbackRationale, risk: null });
-        }
+        if (rankedIds.has(cand.tmdbId)) continue;
+        if (strictIds.has(cand.tmdbId)) continue;
+        ranked.push({ tmdbId: cand.tmdbId, rationale: fallbackRationale, risk: null });
       }
-      return ranked;
+      return { ranked, shortReason: parsed.shortReason };
     }
   } catch (err) {
     console.error(`LLM re-rank failed for ${kind}`, err);
   }
-  return candidates.map((cand) => ({ tmdbId: cand.tmdbId, rationale: fallbackRationale, risk: null }));
+  return {
+    ranked: candidates
+      .filter((cand) => !strictIds.has(cand.tmdbId))
+      .map((cand) => ({ tmdbId: cand.tmdbId, rationale: fallbackRationale, risk: null })),
+    shortReason: null,
+  };
 }
 
 async function enrichToListItems(
@@ -420,11 +437,11 @@ async function enrichToListItems(
         rank: i + 1,
         tmdbId: show.tmdbId,
         title: show.title,
-        type: classifyType(show.genres, show.numberOfSeasons, show.numberOfEpisodes, show.status),
+        type: classifyType(show.genreIds, show.numberOfSeasons, show.numberOfEpisodes, show.status),
         genres: show.genres,
-        tone: toneFor(show.genres),
+        tone: toneFor(show.genreIds),
         pace: paceFor(episodeMinutes || null),
-        structure: structureFor(show.genres),
+        structure: structureFor(show.genreIds),
         episodeMinutes,
         seasons,
         totalHours,
@@ -484,27 +501,57 @@ export async function generateLists(
   }
   await scoreCandidates(c, candidates, tasteText, likedGenreIds);
 
-  const casualCands = candidates
-    .filter((cand) => classifyKind(cand.genreNames) === 'casual')
-    .sort((a, b) => b.retrievalScore - a.retrievalScore)
-    .slice(0, RANK_POOL_SIZE);
-  const deepCands = candidates
-    .filter((cand) => classifyKind(cand.genreNames) === 'deep')
-    .sort((a, b) => b.retrievalScore - a.retrievalScore)
-    .slice(0, RANK_POOL_SIZE);
+  const byScore = (a: Candidate, b: Candidate) => b.retrievalScore - a.retrievalScore;
+  const casualPrimary = candidates
+    .filter((cand) => classifyKind(cand.genreIds) === 'casual')
+    .sort(byScore);
+  const deepPrimary = candidates
+    .filter((cand) => classifyKind(cand.genreIds) === 'deep')
+    .sort(byScore);
 
-  const [casualRanked, deepRanked] = await Promise.all([
-    rankKind(c, 'casual', casualCands, tasteTextForRanking(ctx, 'casual'), uiLang),
-    rankKind(c, 'deep', deepCands, tasteTextForRanking(ctx, 'deep'), uiLang),
+  // Backfill a starved bucket (fewer primaries than a Top 10) from the
+  // other bucket's pool, best retrieval score first. Borrowed candidates
+  // are strict: the re-rank must accept them or they never surface.
+  const withBackfill = (primary: Candidate[], other: Candidate[]) => {
+    const picked = primary.slice(0, RANK_POOL_SIZE);
+    const strictIds = new Set<number>();
+    if (primary.length < TOP_N) {
+      const pickedIds = new Set(picked.map((cand) => cand.tmdbId));
+      for (const cand of other) {
+        if (picked.length >= RANK_POOL_SIZE) break;
+        if (pickedIds.has(cand.tmdbId)) continue;
+        picked.push(cand);
+        strictIds.add(cand.tmdbId);
+      }
+    }
+    return { picked, strictIds };
+  };
+  const casualBucket = withBackfill(casualPrimary, deepPrimary);
+  const deepBucket = withBackfill(deepPrimary, casualPrimary);
+  const casualCands = casualBucket.picked;
+  const deepCands = deepBucket.picked;
+
+  const [casualRank, deepRank] = await Promise.all([
+    rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRanking(ctx, 'casual'), uiLang),
+    rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRanking(ctx, 'deep'), uiLang),
   ]);
+  const casualRanked = casualRank.ranked;
+  const deepRanked = deepRank.ranked;
 
   const [casualItems, deepItems] = await Promise.all([
     enrichToListItems(c, casualRanked, ctx, uiLang),
     enrichToListItems(c, deepRanked, ctx, uiLang),
   ]);
 
-  const shortReasonFor = (items: ListItemOut[], poolSize: number): string | null => {
+  const shortReasonFor = (
+    items: ListItemOut[],
+    poolSize: number,
+    llmReason: string | null,
+  ): string | null => {
     if (items.length >= TOP_N) return null;
+    // The re-rank's own reason, when it ranked fewer than 10, is the
+    // most specific explanation available.
+    if (llmReason) return llmReason;
     if (poolSize === 0) {
       return uiLang === 'he'
         ? 'לא נמצאו סדרות מתאימות לשפות של הפרופיל.'
@@ -522,7 +569,7 @@ export async function generateLists(
         score: casualCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
       })),
       snapshot: casualItems,
-      shortReason: shortReasonFor(casualItems, casualCands.length),
+      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason),
       updatedAt: now,
     },
     deep: {
@@ -531,7 +578,7 @@ export async function generateLists(
         score: deepCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
       })),
       snapshot: deepItems,
-      shortReason: shortReasonFor(deepItems, deepCands.length),
+      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason),
       updatedAt: now,
     },
   };

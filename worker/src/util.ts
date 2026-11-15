@@ -3,9 +3,12 @@
  * module is unit-testable with plain Node (see scripts/selftest.mjs).
  *
  * Classification (kind / type / tone / pace / structure) is heuristic v1
- * from TMDB genre names + runtime + season counts. The heuristics are
- * deliberately simple and documented here; tune them from real usage,
- * not from speculation.
+ * from TMDB genre IDs + runtime + season counts. Genre IDs — never names:
+ * TMDB localizes genre names per UI language, and matching English names
+ * once starved the casual bucket to zero for a Hebrew-language profile
+ * ('קומדיה' !== 'Comedy'), silently emptying its casual list (2026-11-15).
+ * The heuristics are deliberately simple and documented here; tune them
+ * from real usage, not from speculation.
  */
 
 // ---------------------------------------------------------------- titles
@@ -40,16 +43,45 @@ export function cosine(a: number[], b: number[]): number {
 
 // ---------------------------------------------------------------- classification
 
-const CASUAL_GENRES = new Set(['Comedy', 'Reality', 'Animation', 'Family', 'Kids', 'Talk', 'News', 'Soap']);
-const DEEP_GENRES = new Set([
-  'Drama',
-  'Crime',
-  'Mystery',
-  'Sci-Fi & Fantasy',
-  'War & Politics',
-  'Documentary',
-  'Western',
-  'Action & Adventure',
+// TMDB TV genre IDs (verified against /genre/tv/list, 2026-11-15).
+// IDs are stable across UI languages; names are localized. Keep the two
+// sets aligned with the English genre names in the comments.
+const GENRE_ACTION_ADVENTURE = 10759;
+const GENRE_ANIMATION = 16;
+const GENRE_COMEDY = 35;
+const GENRE_CRIME = 80;
+const GENRE_DOCUMENTARY = 99;
+const GENRE_DRAMA = 18;
+const GENRE_FAMILY = 10751;
+const GENRE_KIDS = 10762;
+const GENRE_MYSTERY = 9648;
+const GENRE_NEWS = 10763;
+const GENRE_REALITY = 10764;
+const GENRE_SCIFI_FANTASY = 10765;
+const GENRE_SOAP = 10766;
+const GENRE_TALK = 10767;
+const GENRE_WAR_POLITICS = 10768;
+const GENRE_WESTERN = 37;
+
+const CASUAL_GENRE_IDS = new Set([
+  GENRE_COMEDY,
+  GENRE_REALITY,
+  GENRE_ANIMATION,
+  GENRE_FAMILY,
+  GENRE_KIDS,
+  GENRE_TALK,
+  GENRE_NEWS,
+  GENRE_SOAP,
+]);
+const DEEP_GENRE_IDS = new Set([
+  GENRE_DRAMA,
+  GENRE_CRIME,
+  GENRE_MYSTERY,
+  GENRE_SCIFI_FANTASY,
+  GENRE_WAR_POLITICS,
+  GENRE_DOCUMENTARY,
+  GENRE_WESTERN,
+  GENRE_ACTION_ADVENTURE,
 ]);
 
 /**
@@ -57,18 +89,19 @@ const DEEP_GENRES = new Set([
  * toward deep when Drama is present, toward casual when Comedy is
  * present, else deep. The LLM re-rank judges kind-fit afterwards, so a
  * misclassified show drops in its list rather than vanishing.
+ * Takes genre IDs, never localized names (see module header).
  */
-export function classifyKind(genreNames: string[]): 'casual' | 'deep' {
+export function classifyKind(genreIds: number[]): 'casual' | 'deep' {
   let deep = 0;
   let casual = 0;
-  for (const g of genreNames) {
-    if (DEEP_GENRES.has(g)) deep++;
-    if (CASUAL_GENRES.has(g)) casual++;
+  for (const id of genreIds) {
+    if (DEEP_GENRE_IDS.has(id)) deep++;
+    if (CASUAL_GENRE_IDS.has(id)) casual++;
   }
   if (deep > casual) return 'deep';
   if (casual > deep) return 'casual';
-  if (genreNames.includes('Drama')) return 'deep';
-  if (genreNames.includes('Comedy')) return 'casual';
+  if (genreIds.includes(GENRE_DRAMA)) return 'deep';
+  if (genreIds.includes(GENRE_COMEDY)) return 'casual';
   return 'deep';
 }
 
@@ -79,13 +112,13 @@ export type ShowType = 'series' | 'limited' | 'docuseries' | 'reality';
  * so one ended season with at most 12 episodes reads as limited.
  */
 export function classifyType(
-  genreNames: string[],
+  genreIds: number[],
   seasonCount: number | null,
   episodeCount: number | null,
   status: string | null,
 ): ShowType {
-  if (genreNames.includes('Reality')) return 'reality';
-  if (genreNames.includes('Documentary')) return 'docuseries';
+  if (genreIds.includes(GENRE_REALITY)) return 'reality';
+  if (genreIds.includes(GENRE_DOCUMENTARY)) return 'docuseries';
   if (seasonCount === 1 && status === 'Ended' && episodeCount != null && episodeCount <= 12) {
     return 'limited';
   }
@@ -93,13 +126,13 @@ export function classifyType(
 }
 
 /** Tone chip, v1 heuristic from the first matching genre. */
-export function toneFor(genreNames: string[]): string {
-  if (genreNames.includes('Comedy')) return 'Light';
-  if (genreNames.includes('Crime') || genreNames.includes('Mystery')) return 'Tense';
-  if (genreNames.includes('Drama')) return 'Serious';
-  if (genreNames.includes('Documentary')) return 'Curious';
-  if (genreNames.includes('Reality')) return 'Easy';
-  if (genreNames.includes('Sci-Fi & Fantasy')) return 'Imaginative';
+export function toneFor(genreIds: number[]): string {
+  if (genreIds.includes(GENRE_COMEDY)) return 'Light';
+  if (genreIds.includes(GENRE_CRIME) || genreIds.includes(GENRE_MYSTERY)) return 'Tense';
+  if (genreIds.includes(GENRE_DRAMA)) return 'Serious';
+  if (genreIds.includes(GENRE_DOCUMENTARY)) return 'Curious';
+  if (genreIds.includes(GENRE_REALITY)) return 'Easy';
+  if (genreIds.includes(GENRE_SCIFI_FANTASY)) return 'Imaginative';
   return 'Varied';
 }
 
@@ -112,13 +145,13 @@ export function paceFor(episodeMinutes: number | null): string {
 }
 
 /** Serialized vs episodic, v1 heuristic from genres. */
-export function structureFor(genreNames: string[]): 'serialized' | 'episodic' {
+export function structureFor(genreIds: number[]): 'serialized' | 'episodic' {
   if (
-    genreNames.includes('Comedy') ||
-    genreNames.includes('Reality') ||
-    genreNames.includes('Animation') ||
-    genreNames.includes('Talk') ||
-    genreNames.includes('News')
+    genreIds.includes(GENRE_COMEDY) ||
+    genreIds.includes(GENRE_REALITY) ||
+    genreIds.includes(GENRE_ANIMATION) ||
+    genreIds.includes(GENRE_TALK) ||
+    genreIds.includes(GENRE_NEWS)
   ) {
     return 'episodic';
   }

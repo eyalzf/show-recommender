@@ -31,30 +31,38 @@ assert.equal(util.cosine([1, 0], [0, 1]), 0);
 assert.ok(Math.abs(util.cosine([1, 2], [1, 2]) - 1) < 1e-9);
 assert.equal(util.cosine([], []), 0);
 
-// classifyKind
-assert.equal(util.classifyKind(['Comedy']), 'casual');
-assert.equal(util.classifyKind(['Drama', 'Crime']), 'deep');
-assert.equal(util.classifyKind(['Comedy', 'Drama']), 'deep'); // tie -> Drama wins
-assert.equal(util.classifyKind(['Reality']), 'casual');
-assert.equal(util.classifyKind(['Documentary']), 'deep');
+// classifyKind — genre IDs, never localized names. Regression:
+// 2026-11-15, a Hebrew UI profile got an empty casual list because the
+// classifier matched English names ('Comedy') against Hebrew ones
+// ('קומדיה') and defaulted everything to deep. IDs used below:
+// 35 Comedy, 18 Drama, 80 Crime, 10764 Reality, 99 Documentary.
+assert.equal(util.classifyKind([35]), 'casual');
+assert.equal(util.classifyKind([18, 80]), 'deep');
+assert.equal(util.classifyKind([35, 18]), 'deep'); // tie -> Drama wins
+assert.equal(util.classifyKind([10764]), 'casual');
+assert.equal(util.classifyKind([99]), 'deep');
 assert.equal(util.classifyKind([]), 'deep');
 
 // classifyType
-assert.equal(util.classifyType(['Reality'], 3, 30, 'Returning Series'), 'reality');
-assert.equal(util.classifyType(['Documentary'], 1, 4, 'Ended'), 'docuseries');
-assert.equal(util.classifyType(['Drama'], 1, 8, 'Ended'), 'limited');
-assert.equal(util.classifyType(['Drama'], 1, 20, 'Ended'), 'series');
-assert.equal(util.classifyType(['Drama'], 3, 30, 'Ended'), 'series');
+assert.equal(util.classifyType([10764], 3, 30, 'Returning Series'), 'reality');
+assert.equal(util.classifyType([99], 1, 4, 'Ended'), 'docuseries');
+assert.equal(util.classifyType([18], 1, 8, 'Ended'), 'limited');
+assert.equal(util.classifyType([18], 1, 20, 'Ended'), 'series');
+assert.equal(util.classifyType([18], 3, 30, 'Ended'), 'series');
 
 // tone / pace / structure
-assert.equal(util.toneFor(['Comedy']), 'Light');
-assert.equal(util.toneFor(['Mystery']), 'Tense');
+assert.equal(util.toneFor([35]), 'Light');
+assert.equal(util.toneFor([9648]), 'Tense');
+assert.equal(util.toneFor([18]), 'Serious');
+assert.equal(util.toneFor([99]), 'Curious');
+assert.equal(util.toneFor([10764]), 'Easy');
+assert.equal(util.toneFor([10765]), 'Imaginative');
 assert.equal(util.paceFor(25), 'Brisk');
 assert.equal(util.paceFor(45), 'Steady');
 assert.equal(util.paceFor(60), 'Unhurried');
 assert.equal(util.paceFor(null), 'Steady');
-assert.equal(util.structureFor(['Comedy']), 'episodic');
-assert.equal(util.structureFor(['Drama']), 'serialized');
+assert.equal(util.structureFor([35]), 'episodic');
+assert.equal(util.structureFor([18]), 'serialized');
 
 // displaySeasons: season 0 (specials) never counts
 assert.equal(
