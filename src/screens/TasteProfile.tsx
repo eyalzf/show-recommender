@@ -265,7 +265,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       ) : null}
 
       <div>
-        <p className="taste-hint">{t(lang, 'noteAutoUpdateHint')}</p>
         <input
           type="text"
           value={note}
