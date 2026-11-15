@@ -20,35 +20,6 @@ await build({
 const util = await import(outFile);
 await unlink(outFile).catch(() => {});
 
-// Rail scroll direction helpers (src/railScroll.ts): pure, tested for
-// both LTR and RTL — no real browser is available in this environment.
-const railOutFile = join(root, 'node_modules', '.selftest-rail.mjs');
-await build({
-  entryPoints: [join(root, 'src', 'railScroll.ts')],
-  bundle: true,
-  format: 'esm',
-  platform: 'node',
-  outfile: railOutFile,
-  logLevel: 'silent',
-});
-const rail = await import(railOutFile);
-await unlink(railOutFile).catch(() => {});
-
-// railScrollDelta: PHYSICAL arrows — the delta depends only on which
-// arrow was pressed, never on document direction. The right arrow
-// moves the visible window rightward (positive delta), the left arrow
-// leftward (negative delta), identically in LTR and RTL. The helper
-// takes no direction argument, so a locale-dependent sign flip cannot
-// be expressed through this API.
-assert.equal(rail.railScrollDelta(true, 800), 800);
-assert.equal(rail.railScrollDelta(false, 800), -800);
-assert.ok(rail.railScrollDelta(true, 0) === 0);
-assert.ok(rail.railScrollDelta(false, 0) === 0);
-// Arrow glyphs: directional, identical in English and Hebrew — never
-// mirrored, never swapped between languages.
-assert.equal(rail.RAIL_ARROW_LEFT, '‹');
-assert.equal(rail.RAIL_ARROW_RIGHT, '›');
-
 // normalizeTitle
 assert.equal(util.normalizeTitle('Fauda!'), 'fauda');
 assert.equal(util.normalizeTitle('  Kupa   Rashit '), 'kupa rashit');

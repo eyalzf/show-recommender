@@ -140,7 +140,7 @@ export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
       {(show.cast ?? []).length > 0 ? (
         <>
           <h3>{t(lang, 'castTitle')}</h3>
-          <Rail lang={lang} label={t(lang, 'castTitle')}>
+          <Rail label={t(lang, 'castTitle')}>
             {(show.cast ?? []).map((m) => (
               <article className="cast-card" key={m.tmdbId}>
                 {m.profilePath ? (

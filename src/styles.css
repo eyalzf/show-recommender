@@ -325,30 +325,6 @@ input[type="file"] { font-size: 0.9rem; }
 .rail-skeletons { display: flex; gap: 14px; margin-top: 16px; overflow: hidden; }
 .rail-skeleton { flex: 0 0 168px; }
 
-/* Rail controls: a row BELOW the cards, never overlaid on them — no
-   control may cover or clip a card at either end. The row is forced
-   LTR so the two directional arrows keep identical positions and
-   glyphs in English and Hebrew (left arrow left, right arrow right,
-   grouped at the physical right). Desktop affordance only
-   (hover-capable pointers); touch devices swipe. */
-.rail-controls {
-  display: none;
-  direction: ltr;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 10px;
-}
-.rail-arrow {
-  width: 36px; height: 36px; border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  background: var(--card); color: #fff;
-  font-size: 1.4rem; line-height: 1; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-}
-.rail-arrow:hover { border-color: var(--red-bright); }
-@media (hover: hover) and (pointer: fine) {
-  .rail-controls { display: flex; }
-}
 @media (prefers-reduced-motion: reduce) {
   .rail-viewport { scroll-behavior: auto; }
 }

@@ -165,7 +165,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
               {t(lang, 'buildingList')}
             </p>
           ) : null}
-          <Rail lang={lang} label={title}>
+          <Rail label={title}>
             {items.map((item) => (
               <RailCard
                 key={`${title}-${item.tmdbId}-${item.rank}`}
