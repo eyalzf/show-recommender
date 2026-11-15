@@ -30,7 +30,8 @@ binding = "AI"
 #   TMDB_READ_TOKEN — TMDB API v4 read access token (Bearer). Until it is set,
 #   the /api/search and /api/shows/* routes return `tmdb_not_configured`.
 #
-# Plain-text vars (set in deploy/bindings*.json, never in production):
-#   LLM_PROVIDER=mock, IS_DEV_WORKER=true, LLM_MODEL=<cheap model id>
-#   exist ONLY on the dev Worker (show-recommender-dev). Production
-#   bindings must never carry them — see deploy/README.md.
+# Plain-text vars (set in deploy/bindings-dev.json, never in production):
+#   LLM_PROVIDER=mock, IS_DEV_WORKER=true exist ONLY on the dev Worker
+#   (show-recommender-dev). Production bindings must never carry them
+#   — see deploy/README.md. LLM_MODEL / EMBEDDING_MODEL overrides are
+#   local-run knobs, set on neither Worker.

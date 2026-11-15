@@ -29,21 +29,20 @@ export interface Env {
   LLM_PROVIDER?: string;
   /**
    * Chat-model override for the real provider (a Workers AI model id).
-   * Unset = the production default (Llama 3.3 70B). The dev Worker
-   * sets this to the cheap 8B model so the dev view's "cheap model"
-   * switch has something cheap to switch to.
+   * Unset = the production default (Llama 3.3 70B). A local-run knob
+   * only — set on neither Worker (see docs/dev-verification.md).
    */
   LLM_MODEL?: string;
   /**
    * Embedding-model override for the real provider. Unset = BGE-M3.
+   * A local-run knob only — set on neither Worker.
    */
   EMBEDDING_MODEL?: string;
   /**
-   * `'true'` ONLY on the dev Worker (show-recommender-dev). Gates the
-   * per-request dev provider override: the backend honors the
-   * X-Dev-Llm-Provider header only when this is 'true', so the
-   * override can never affect production. Also drives the DEV banner
-   * in the UI (via /api/health). Never set in production bindings.
+   * `'true'` ONLY on the dev Worker (show-recommender-dev). Drives
+   * the DEV banner in the UI (via /api/health). It gates nothing
+   * else — there is no per-request override path. Never set in
+   * production bindings.
    */
   IS_DEV_WORKER?: string;
 }

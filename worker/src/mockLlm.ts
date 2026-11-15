@@ -5,8 +5,8 @@ import type { LlmProvider, LlmRequest } from './llm';
  * development path.
  *
  * Enabled ONLY by the explicit env flag LLM_PROVIDER=mock (dev Worker
- * bindings, or a local run), or by the dev-only per-request override
- * (see llm.resolveLlmMode). The mock never calls Workers AI, so a
+ * bindings, or a local run) — see llm.resolveLlmMode. There is no
+ * per-request override path. The mock never calls Workers AI, so a
  * verification session against the mock costs ZERO neurons. The
  * default, with no flag, is always the real provider.
  *

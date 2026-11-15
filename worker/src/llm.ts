@@ -24,10 +24,12 @@ import { formatSectionsForPrompt, type TasteSections } from './util';
  *
  * PROVIDER SELECTION (resolveLlmMode — the ONE place): the default is
  * always the real Workers AI provider. The deterministic mock
- * (mockLlm.ts) engages only via the explicit LLM_PROVIDER=mock env flag
- * or the dev-only per-request override, and the override is honored
- * ONLY on the dev Worker (IS_DEV_WORKER=true), so it can never affect
- * production. See docs/dev-verification.md.
+ * (mockLlm.ts) engages only via the explicit LLM_PROVIDER=mock env
+ * flag (dev Worker bindings, local runs). There is deliberately NO
+ * per-request override path: no header, parameter, or UI switch can
+ * change the provider at runtime, so production can never be switched
+ * to the mock or a cheaper model by a request. See
+ * docs/dev-verification.md.
  */
 
 export interface LlmRequest {
@@ -45,31 +47,9 @@ export interface LlmProvider {
 /** Production chat model. Never change the default without a product decision. */
 export const DEFAULT_CHAT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
-/**
- * Cheap chat model for the dev view's "cheap model" switch. Env
- * LLM_MODEL overrides this when set. NOTE: Cloudflare lists this id
- * with a planned deprecation (20 Nov 2026, per the Workers AI model
- * catalog) — if the cheap switch stops working, pick the current cheap
- * id from the catalog and set LLM_MODEL on the dev Worker; no code
- * change is needed. The id is verified by the single post-reset smoke
- * call, not by assumption (see docs/dev-verification.md).
- */
-export const CHEAP_CHAT_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
-
-/** Request header carrying the dev-only provider override ('mock' | 'cheap'). Honored only on the dev Worker. */
-export const DEV_OVERRIDE_HEADER = 'x-dev-llm-provider';
-
-export type DevOverride = 'mock' | 'cheap';
-
-/** True only on the dev Worker. The override gate depends on this exact value. */
+/** True only on the dev Worker. Drives the DEV banner (via /api/health); it gates nothing else. */
 export function isDevWorker(env: Env): boolean {
   return env.IS_DEV_WORKER === 'true';
-}
-
-/** Parse the override header. Anything other than the two exact values is ignored. */
-export function parseDevOverride(headerValue: string | null | undefined): DevOverride | null {
-  if (headerValue === 'mock' || headerValue === 'cheap') return headerValue;
-  return null;
 }
 
 export type LlmMode =
@@ -80,26 +60,15 @@ export type LlmMode =
 /**
  * THE provider decision — every call site goes through here (via
  * getLlmProvider / embedTextsWithEnv). Precedence:
- *   1. Dev-only per-request override, honored ONLY when IS_DEV_WORKER
- *      is 'true'. 'mock' forces the mock; 'cheap' forces the real
- *      provider with the cheap model (LLM_MODEL env wins when set).
- *   2. LLM_PROVIDER=mock env flag (dev Worker bindings, local runs).
- *   3. Real provider with LLM_MODEL override, else the 70B default.
- *   4. No AI binding: the stub (which callers must never persist).
+ *   1. LLM_PROVIDER=mock env flag (dev Worker bindings, local runs).
+ *   2. Real provider with LLM_MODEL override, else the 70B default.
+ *   3. No AI binding: the stub (which callers must never persist).
  *
- * On a non-dev Worker the override header is silently ignored — the
- * header alone can never switch production to the mock or the cheap
- * model. Unit-tested in scripts/selftest.mjs.
+ * There is no per-request override: the decision is a pure function
+ * of env, so no header or client input can change it. Unit-tested in
+ * scripts/selftest.mjs.
  */
-export function resolveLlmMode(env: Env, devOverrideHeader?: string | null): LlmMode {
-  if (isDevWorker(env)) {
-    const override = parseDevOverride(devOverrideHeader);
-    if (override === 'mock') return { kind: 'mock' };
-    if (override === 'cheap') {
-      if (!env.AI) return { kind: 'stub' };
-      return { kind: 'real', model: env.LLM_MODEL ?? CHEAP_CHAT_MODEL };
-    }
-  }
+export function resolveLlmMode(env: Env): LlmMode {
   if (env.LLM_PROVIDER === 'mock') return { kind: 'mock' };
   if (env.AI) return { kind: 'real', model: env.LLM_MODEL ?? DEFAULT_CHAT_MODEL };
   return { kind: 'stub' };
@@ -160,8 +129,8 @@ export class StubLlmProvider implements LlmProvider {
 //   ... POST https://api.meta.ai/v1/chat/completions, OpenAI-compatible ...
 // }
 
-export function getLlmProvider(env: Env, devOverrideHeader?: string | null): LlmProvider {
-  const mode = resolveLlmMode(env, devOverrideHeader);
+export function getLlmProvider(env: Env): LlmProvider {
+  const mode = resolveLlmMode(env);
   if (mode.kind === 'mock') return new MockLlmProvider();
   if (mode.kind === 'real') return new WorkersAiLlamaProvider(env.AI!, mode.model);
   return new StubLlmProvider();

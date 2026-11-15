@@ -317,23 +317,27 @@ console.log('bootstrap data written (5 ratings + 2 notes)');
   console.log('ad-hoc pick via mock:', body.result.title);
 }
 
-// 6. Dev override header engages the mock on a dev Worker WITHOUT the env flag.
+// 6. There is NO override path: a stray x-dev-llm-provider header is
+//    IGNORED everywhere. A dev Worker WITHOUT the LLM_PROVIDER=mock
+//    env flag takes the REAL path even with the header — the throwing
+//    AI binding fails the call, proving no request can engage the mock.
 {
   const devNoFlag = { DB, AI: throwingAi, TMDB_READ_TOKEN: 'mock-token', IS_DEV_WORKER: 'true' };
-  const { status, body } = await call(
+  const before = aiCalls;
+  const { status } = await call(
     devNoFlag,
     'POST',
     '/api/taste/consolidate',
     { profileId, lang: 'he' },
     { 'x-dev-llm-provider': 'mock' },
   );
-  assert.equal(status, 200);
-  assert.equal(body.provider, 'mock');
-  console.log('dev header override (mock) honored on dev Worker');
+  assert.equal(status, 500);
+  assert.equal(aiCalls, before + 1, 'header ignored: exactly one real AI attempt');
+  console.log('stray override header ignored on dev Worker (real path attempted, failed as designed)');
 }
 
-// 7. The SAME header is IGNORED without the dev flag (defense in depth):
-//    no AI binding + override header -> 'no_ai', never the mock.
+// 7. The SAME header is likewise ignored without the dev flag:
+//    no AI binding + header -> 'no_ai', never the mock.
 {
   const prodLike = { DB, TMDB_READ_TOKEN: 'mock-token' };
   const { status, body } = await call(
@@ -348,26 +352,9 @@ console.log('bootstrap data written (5 ratings + 2 notes)');
   console.log('override header ignored without IS_DEV_WORKER (503 no_ai, mock NOT engaged)');
 }
 
-// 8. 'cheap' override on a dev Worker takes the REAL path (proves the
-//    switch changes behavior): the throwing AI binding fails the call.
-{
-  const devNoFlag = { DB, AI: throwingAi, TMDB_READ_TOKEN: 'mock-token', IS_DEV_WORKER: 'true' };
-  const before = aiCalls;
-  const { status } = await call(
-    devNoFlag,
-    'POST',
-    '/api/taste/consolidate',
-    { profileId, lang: 'he' },
-    { 'x-dev-llm-provider': 'cheap' },
-  );
-  assert.equal(status, 500);
-  assert.equal(aiCalls, before + 1, 'cheap override attempted exactly one real AI call');
-  console.log('cheap override attempted the real AI path (1 call, failed as designed)');
-}
-
-// 9. Zero real AI calls across the whole mock flow.
-assert.equal(aiCalls, 1, 'only the deliberate cheap-path probe touched AI');
-console.log('AI calls total:', aiCalls, '(1 = the deliberate cheap-path probe; mock flow = 0)');
+// 8. Zero real AI calls across the whole mock flow.
+assert.equal(aiCalls, 1, 'only the deliberate header-is-dead probe touched AI');
+console.log('AI calls total:', aiCalls, '(1 = the deliberate header-is-dead probe; mock flow = 0)');
 
 await unlink(outFile).catch(() => {});
 console.log('local mock run: ALL CHECKS PASSED (zero neurons)');

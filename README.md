@@ -184,10 +184,10 @@ Verification is mock-first and quota-frugal — read
 [`docs/dev-verification.md`](docs/dev-verification.md) before running
 anything against a real model. The dev deployment
 (https://show-recommender-dev.eyalzf.workers.dev) runs the same bundle
-with the mock provider by default, a separate database, and a DEV
-banner + provider switch in the UI; production keeps the 70B model
-only. See `deploy/README.md` for the bindings split and the rule that
-production bindings must never carry dev flags.
+mock-only, with a separate database and a DEV banner in the UI;
+production keeps the 70B model only. See `deploy/README.md` for the
+bindings split and the rule that production bindings must never carry
+dev flags.
 
 ## Deploy
 
@@ -234,7 +234,7 @@ deploy/              bindings.json — production Worker bindings;
    layers, not preference learning).
 6. Rating a show anywhere removes it from both Top 10 lists.
 7. The default LLM provider is always the real one. The mock engages
-   only via the explicit LLM_PROVIDER=mock flag or the dev-only
-   override, which the backend honors only when IS_DEV_WORKER=true —
-   production bindings must never carry either flag (see
-   deploy/README.md).
+   only via the explicit LLM_PROVIDER=mock env flag. There is no
+   per-request override path — no header or UI switch can change the
+   provider — and production bindings must never carry the mock flag
+   (see deploy/README.md).

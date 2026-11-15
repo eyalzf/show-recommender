@@ -55,42 +55,49 @@ npm run local:mock
 in-memory SQLite running the real migrations, a stubbed TMDB fetch
 serving invented fixtures, and an AI binding that throws if touched.
 It exercises profile creation → ratings/notes → event-driven
-consolidation → full list generation → ad-hoc pick, plus the dev
-override gating (honored on dev, ignored without the dev flag).
-Exit code non-zero on any failed assertion.
+consolidation → full list generation → ad-hoc pick, plus the
+no-override-path proof (a stray override header is ignored
+everywhere). Exit code non-zero on any failed assertion.
 
 Unit tests (`npm run test`) cover mock determinism/shapes, provider
-selection (default-real, mock flag, override gating), and model-config
-defaults. Run `npm run typecheck && npm run test` before every push.
+selection (default-real, mock flag, no override path), and
+model-config defaults. Run `npm run typecheck && npm run test` before
+every push.
 
-## The dev deployment (mock by default, cheap model on demand)
+## The dev deployment (mock only)
 
 - URL: https://show-recommender-dev.eyalzf.workers.dev
 - Same bundle as production; separate D1 (`show-recommender-dev`) and
   R2 (`show-recommender-dev`); `LLM_PROVIDER=mock`,
-  `IS_DEV_WORKER=true`, `LLM_MODEL` = cheap 8B.
-- The UI shows an unmistakable DEV banner + watermark and a provider
-  switch (Mock / Cheap model) that applies per tab session. The
-  backend honors the switch ONLY on the dev Worker.
+  `IS_DEV_WORKER=true`.
+- The UI shows an unmistakable DEV banner + watermark stating the
+  mock provider. There is NO provider switch: the dev Worker is
+  mock-only via env, period (decision 19:15 IST — the per-request
+  override path was removed, so no header or UI control can change
+  the provider on either Worker).
 - Deploy: see `deploy/README.md`. Never copy production profile,
   feedback, or taste data into dev — create test profiles there.
-- Cheap-model calls draw from the SAME account allowance as
-  production. The cheap path is verified by code/config review plus
-  exactly ONE live smoke call after a quota reset — never by retrying
-  against exhausted quota.
+- Dev costs zero neurons: the mock never calls Workers AI. There is
+  no cheap-model path in the dev view, so no smoke call is owed for
+  one.
 
-### Cheap model id
+### Model-config overrides (local runs only)
 
-`@cf/meta/llama-3.1-8b-instruct-fp8` (set via `LLM_MODEL` in dev
-bindings). Notes:
+The chat/embedding model ids are env-configurable (`LLM_MODEL`,
+`EMBEDDING_MODEL`), defaulting to Llama 3.3 70B + BGE-M3. The
+overrides are a LOCAL-run knob only — neither Worker sets them.
+A cheap local-run option is `@cf/meta/llama-3.1-8b-instruct-fp8`.
+Notes:
 
 - The non-fp8 `@cf/meta/llama-3.1-8b-instruct` id was deprecated
   30 May 2026 — do not use it.
 - Cloudflare lists the fp8 id with a planned deprecation of
-  20 Nov 2026. If the cheap switch stops working, pick the current
-  cheap id from the Workers AI model catalog and update the dev
-  binding — no code change needed.
+  20 Nov 2026. If a cheap local run stops working, pick the current
+  cheap id from the Workers AI model catalog — no code change needed.
 - Embeddings stay BGE-M3 (or mock) in all modes.
+- Real-model local runs draw from the same account allowance as
+  production — check the budget before running one, and prefer the
+  mock.
 
 ## Deploy commands
 

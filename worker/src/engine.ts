@@ -15,7 +15,6 @@ import {
   type TmdbSearchResult,
 } from './tmdb';
 import {
-  DEV_OVERRIDE_HEADER,
   buildAdhocRationalePrompt,
   buildRankPrompt,
   buildRemovalCheckPrompt,
@@ -533,7 +532,7 @@ async function scoreCandidates(
     for (const m of likedMeta) {
       texts.push(candidateEmbedText(m.title, m.genreNames, m.originalLanguage, m.originCountry));
     }
-    const vectors = await embedTextsWithEnv(c.env, texts, c.req.header(DEV_OVERRIDE_HEADER));
+    const vectors = await embedTextsWithEnv(c.env, texts);
     if (vectors && vectors.length === texts.length) {
       // Blend: long-term at full weight, short-term additive — the
       // long-term profile is never decayed away (see rerank.ts).
@@ -617,7 +616,7 @@ async function rankKind(
   uiLang: string,
 ): Promise<{ ranked: RankedEntry[]; shortReason: string | null }> {
   if (candidates.length === 0) return { ranked: [], shortReason: null };
-  const provider = getLlmProvider(c.env, c.req.header(DEV_OVERRIDE_HEADER));
+  const provider = getLlmProvider(c.env);
   const fallbackRationale =
     uiLang === 'he' ? 'תואם את פרופיל הטעם.' : 'Matches your taste profile.';
   const byId = new Map(candidates.map((cand) => [cand.tmdbId, cand]));
@@ -731,7 +730,7 @@ async function removalCheck(
   const checkSet = ordered.slice(0, REMOVAL_CHECK_SIZE);
   const validIds = new Set(checkSet.map((e) => e.tmdbId));
   try {
-    const provider = getLlmProvider(c.env, c.req.header(DEV_OVERRIDE_HEADER));
+    const provider = getLlmProvider(c.env);
     const text = await provider.generate(
       buildRemovalCheckPrompt(
         negatives.map((m) => ({ title: m.title, year: m.year, genres: m.genreNames })),
@@ -1097,16 +1096,12 @@ export async function generateAdhocPick(
 
   let pick = candidates[0];
   if (c.env.AI) {
-    const vectors = await embedTextsWithEnv(
-      c.env,
-      [
-        query,
-        ...candidates.map((cand) =>
-          candidateEmbedText(cand.title, cand.genreNames, cand.originalLanguage, cand.originCountry),
-        ),
-      ],
-      c.req.header(DEV_OVERRIDE_HEADER),
-    );
+    const vectors = await embedTextsWithEnv(c.env, [
+      query,
+      ...candidates.map((cand) =>
+        candidateEmbedText(cand.title, cand.genreNames, cand.originalLanguage, cand.originCountry),
+      ),
+    ]);
     if (vectors && vectors.length === candidates.length + 1) {
       let best = -Infinity;
       vectors.slice(1).forEach((v, i) => {
@@ -1122,7 +1117,7 @@ export async function generateAdhocPick(
     pick = candidates[0];
   }
 
-  const provider = getLlmProvider(c.env, c.req.header(DEV_OVERRIDE_HEADER));
+  const provider = getLlmProvider(c.env);
   const rationale = await provider.generate(
     buildAdhocRationalePrompt(
       query,

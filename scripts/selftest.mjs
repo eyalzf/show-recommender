@@ -549,10 +549,9 @@ assert.ok(Math.abs(util.cosine(vecA1[0], vecA1[0]) - 1) < 1e-9);
 assert.ok(Math.abs(util.cosine(vecA1[0], vecA1[1])) < 0.9);
 assert.deepEqual(mockLlm.mockEmbedTexts(['']), [new Array(64).fill(0)]);
 
-// --- provider selection: default is real; mock needs the flag; override needs dev ---
+// --- provider selection: default is real; mock needs the env flag; no override path ---
 
 assert.equal(llm.DEFAULT_CHAT_MODEL, '@cf/meta/llama-3.3-70b-instruct-fp8-fast');
-assert.equal(llm.CHEAP_CHAT_MODEL, '@cf/meta/llama-3.1-8b-instruct-fp8');
 assert.equal(embeddings.DEFAULT_EMBED_MODEL, '@cf/baai/bge-m3');
 assert.equal(embeddings.resolveEmbedModel({}), '@cf/baai/bge-m3');
 assert.equal(embeddings.resolveEmbedModel({ EMBEDDING_MODEL: 'custom-embed' }), 'custom-embed');
@@ -570,32 +569,16 @@ assert.equal(llm.getLlmProvider({}).name, 'stub');
 // Mock works without an AI binding (local runs); stub still blocks.
 assert.deepEqual(llm.resolveLlmMode({ LLM_PROVIDER: 'mock' }), { kind: 'mock' });
 
-// Defense in depth: the override header is IGNORED without IS_DEV_WORKER=true.
-assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi }, 'mock'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
-assert.deepEqual(llm.resolveLlmMode({}, 'mock'), { kind: 'stub' });
-assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'false' }, 'mock'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
-assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: '1' }, 'mock'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
-// On the dev Worker the override is honored.
-assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, 'mock'), { kind: 'mock' });
-assert.deepEqual(
-  llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, 'cheap'),
-  { kind: 'real', model: llm.CHEAP_CHAT_MODEL },
-);
-assert.deepEqual(
-  llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true', LLM_MODEL: 'custom-cheap' }, 'cheap'),
-  { kind: 'real', model: 'custom-cheap' },
-);
-// Cheap without an AI binding degrades to stub, never to a crash.
-assert.deepEqual(llm.resolveLlmMode({ IS_DEV_WORKER: 'true' }, 'cheap'), { kind: 'stub' });
-// Invalid override values are ignored (env default wins).
-assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, 'bogus'), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
-assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }, null), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+// There is deliberately NO per-request override path (removed by
+// decision, 19:15 IST): the decision is a pure function of env. The
+// dev flag alone never engages the mock, and no extra env field can
+// switch the provider — only LLM_PROVIDER=mock does.
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true' }), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'true', LLM_PROVIDER: 'mock' }), { kind: 'mock' });
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, IS_DEV_WORKER: 'false' }), { kind: 'real', model: llm.DEFAULT_CHAT_MODEL });
 assert.equal(llm.isDevWorker({ IS_DEV_WORKER: 'true' }), true);
 assert.equal(llm.isDevWorker({}), false);
-assert.equal(llm.parseDevOverride('mock'), 'mock');
-assert.equal(llm.parseDevOverride('cheap'), 'cheap');
-assert.equal(llm.parseDevOverride('MOCK'), null);
-assert.equal(llm.parseDevOverride(undefined), null);
+assert.equal(llm.isDevWorker({ IS_DEV_WORKER: '1' }), false);
 
 // --- embedTextsWithEnv: mock returns vectors without touching AI; real path uses the model override ---
 const mockVecs = await embeddings.embedTextsWithEnv({ LLM_PROVIDER: 'mock', AI: fakeAi }, ['a', 'b']);

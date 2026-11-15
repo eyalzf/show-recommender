@@ -19,7 +19,6 @@ import {
   type TmdbSearchResult,
 } from './tmdb';
 import {
-  DEV_OVERRIDE_HEADER,
   buildConsolidationPrompt,
   getLlmProvider,
   isDevWorker,
@@ -126,8 +125,6 @@ app.get('/api/health', (c) => {
     // Runtime identity for the frontend + deploy verification: the dev
     // flag drives the DEV banner (same bundle serves both Workers),
     // and the provider name makes a misconfigured mock deploy visible.
-    // The provider reported here is the env default — a dev-only
-    // per-request override does not change it.
     dev: isDevWorker(c.env),
     llmProvider: getLlmProvider(c.env).name,
   });
@@ -658,14 +655,13 @@ async function consolidateFromLog(
   db: D1Database,
   profileId: string,
   uiLang: string,
-  devOverrideHeader?: string | null,
 ): Promise<ConsolidationOutcome | 'not_found' | 'no_ai'> {
   // Mock mode needs no AI binding (the mock never calls Workers AI);
   // the stub path must still never save a canned "summary".
-  if (!env.AI && resolveLlmMode(env, devOverrideHeader).kind !== 'mock') return 'no_ai';
+  if (!env.AI && resolveLlmMode(env).kind !== 'mock') return 'no_ai';
   const ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) return 'not_found';
-  const provider = getLlmProvider(env, devOverrideHeader);
+  const provider = getLlmProvider(env);
   // Every rating feeds consolidation — a rating carries its show title
   // even without a reason ("Liked: Fauda" is a taste statement); only
   // text-less notes are meaningless and skipped. Titles in prompts are
@@ -747,10 +743,10 @@ function scheduleConsolidation(c: Ctx, profileId: string, uiLang: string): void 
   if (!hasDb(c)) return;
   // The mock needs no AI binding; without it, a missing binding means
   // there is nothing to consolidate with (see consolidateFromLog).
-  if (!c.env.AI && resolveLlmMode(c.env, c.req.header(DEV_OVERRIDE_HEADER)).kind !== 'mock') return;
+  if (!c.env.AI && resolveLlmMode(c.env).kind !== 'mock') return;
   const task = (async () => {
     try {
-      await consolidateFromLog(c.env, c.env.DB!, profileId, uiLang, c.req.header(DEV_OVERRIDE_HEADER));
+      await consolidateFromLog(c.env, c.env.DB!, profileId, uiLang);
     } catch (err) {
       console.error('background consolidation failed', err);
     }
@@ -868,7 +864,7 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
   await requireProfileAccess(c, profileId);
   const uiLang = lang === 'he' ? 'he' : 'en';
   if (!hasDb(c)) {
-    const provider = getLlmProvider(c.env, c.req.header(DEV_OVERRIDE_HEADER));
+    const provider = getLlmProvider(c.env);
     const notes: ConsolidationNote[] = STUB_TASTE.notes.map((n) => ({
       kind: n.kind,
       source: 'note' as const,
@@ -888,7 +884,7 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
       stub: true,
     });
   }
-  const outcome = await consolidateFromLog(c.env, c.env.DB!, profileId, uiLang, c.req.header(DEV_OVERRIDE_HEADER));
+  const outcome = await consolidateFromLog(c.env, c.env.DB!, profileId, uiLang);
   if (outcome === 'not_found') {
     return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
   }
@@ -990,7 +986,7 @@ app.post('/api/adhoc', async (c: Ctx) => {
       .bind(crypto.randomUUID(), profileId, String(query).trim(), JSON.stringify(result), Date.now())
       .run();
   }
-  return c.json({ result, provider: getLlmProvider(c.env, c.req.header(DEV_OVERRIDE_HEADER)).name, stub: false });
+  return c.json({ result, provider: getLlmProvider(c.env).name, stub: false });
 });
 
 // ---------------------------------------------------------------- static assets

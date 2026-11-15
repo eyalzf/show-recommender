@@ -59,19 +59,16 @@ export async function embedTexts(
 
 /**
  * Env-aware embedding entry — the call sites' one path. In mock mode
- * (LLM_PROVIDER=mock or the dev-only override) returns deterministic
- * mock vectors with ZERO Workers AI calls; otherwise the real model
- * (EMBEDDING_MODEL override, else BGE-M3); null when no AI binding.
- * Embeddings stay BGE-M3 in cheap mode — only the chat model gets
- * cheaper, per the dev-view decision.
+ * (LLM_PROVIDER=mock) returns deterministic mock vectors with ZERO
+ * Workers AI calls; otherwise the real model (EMBEDDING_MODEL
+ * override, else BGE-M3); null when no AI binding.
  */
 export async function embedTextsWithEnv(
   env: Env,
   texts: string[],
-  devOverrideHeader?: string | null,
 ): Promise<number[][] | null> {
   if (texts.length === 0) return [];
-  const mode = resolveLlmMode(env, devOverrideHeader);
+  const mode = resolveLlmMode(env);
   if (mode.kind === 'mock') return mockEmbedTexts(texts);
   if (mode.kind !== 'real' || !env.AI) return null;
   return embedTexts(env.AI, texts, resolveEmbedModel(env));

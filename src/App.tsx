@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, getDevProviderChoice, setDevMode, setDevProviderChoice, type DevProviderChoice } from './api';
+import { api } from './api';
 import type { ListItem, Profile, ScreenName, UiLang } from './types';
 import { detectLang, t } from './i18n';
 import { ProfilePicker } from './screens/ProfilePicker';
@@ -39,7 +39,6 @@ export function App() {
   // bundle serves production and dev — nothing here is build-time).
   const [isDev, setIsDev] = useState(false);
   const [serverProvider, setServerProvider] = useState('unknown');
-  const [devChoice, setDevChoice] = useState<DevProviderChoice | null>(() => getDevProviderChoice());
 
   useEffect(() => {
     // The health check decides dev identity; a failed check means
@@ -49,17 +48,11 @@ export function App() {
       .then((res) => {
         setIsDev(Boolean(res.dev));
         setServerProvider(res.llmProvider ?? 'unknown');
-        if (res.dev) setDevMode(true);
       })
       .catch(() => {
         setIsDev(false);
       });
   }, []);
-
-  const handleDevChoice = (choice: DevProviderChoice) => {
-    setDevProviderChoice(choice);
-    setDevChoice(choice);
-  };
 
   // Bilingual by design (spec §8): default from the browser, switchable,
   // layout mirrors fully in RTL.
@@ -148,7 +141,7 @@ export function App() {
   return (
     <div className="app">
       {isDev ? (
-        <DevBar lang={lang} serverProvider={serverProvider} choice={devChoice} onChoice={handleDevChoice} />
+        <DevBar lang={lang} serverProvider={serverProvider} />
       ) : null}
       <header className="header">
         <div className="header-title">

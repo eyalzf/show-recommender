@@ -660,8 +660,6 @@ html[dir="rtl"] .stepper-step { padding: 8px 8px 8px 16px; }
   padding: 10px 14px;
 }
 
-.dev-label { font-weight: 700; }
-.dev-switch { display: flex; gap: 8px; }
 .dev-meta { font-size: 0.85rem; }
 
 .dev-watermark {
