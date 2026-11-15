@@ -1,0 +1,224 @@
+{
+ "consolidation": [
+  {
+   "expect": {
+    "absentAnywhereElse": [
+     "קליל",
+     "ברקע",
+     "סיטקום",
+     "עייף"
+    ],
+    "mustContainAny": [
+     "קליל",
+     "ברקע",
+     "סיטקום",
+     "עייף"
+    ],
+    "section": "casual"
+   },
+   "id": "cons-he-casual",
+   "languages": [
+    "he",
+    "en"
+   ],
+   "seed": {
+    "existingSummary": null,
+    "notes": [
+     "בערב, כשאני עייף אחרי יום ארוך, בא לי משהו קליל ברקע — סיטקום קצר."
+    ],
+    "ratings": []
+   },
+   "uiLang": "he"
+  },
+  {
+   "expect": {
+    "absentAnywhereElse": [
+     "מורכב",
+     "סוחף",
+     "להתרכז",
+     "תשומת לב"
+    ],
+    "mustContainAny": [
+     "מורכב",
+     "סוחף",
+     "להתרכז",
+     "תשומת לב"
+    ],
+    "section": "deep"
+   },
+   "id": "cons-he-deep",
+   "languages": [
+    "he",
+    "en"
+   ],
+   "seed": {
+    "existingSummary": null,
+    "notes": [
+     "כשיש לי זמן להתרכז, אני אוהב סדרות מורכבות וסוחפות עם עלילה מתמשכת שדורשת תשומת לב."
+    ],
+    "ratings": []
+   },
+   "uiLang": "he"
+  },
+  {
+   "expect": {
+    "mustContainAny": [
+     "reality"
+    ],
+    "negationAnyOf": [
+     "never",
+     "not",
+     "avoid",
+     "can't",
+     "don't",
+     "without",
+     "no "
+    ],
+    "ratingTitlesInShared": [
+     "Breaking Bad"
+    ],
+    "section": "shared"
+   },
+   "id": "cons-en-dislike",
+   "languages": [
+    "he",
+    "en"
+   ],
+   "seed": {
+    "existingSummary": null,
+    "notes": [
+     "I really can't stand reality TV and talent contests — never suggest those to me."
+    ],
+    "ratings": [
+     {
+      "originalLanguage": "en",
+      "rating": "liked",
+      "showTitle": "Breaking Bad",
+      "text": "",
+      "tmdbId": 1396
+     }
+    ]
+   },
+   "uiLang": "en"
+  },
+  {
+   "expect": {
+    "mustContainAll": [
+     "ספרד",
+     "דרמ"
+    ],
+    "negationAnyOf": [
+     "רק",
+     "לא",
+     "אף פעם"
+    ],
+    "section": "shared"
+   },
+   "id": "cons-he-language",
+   "languages": [
+    "he",
+    "en"
+   ],
+   "seed": {
+    "existingSummary": null,
+    "notes": [
+     "בספרדית אני צופה רק בדרמות. קומדיות בספרדית לא מעניינות אותי."
+    ],
+    "ratings": []
+   },
+   "uiLang": "he"
+  },
+  {
+   "expect": {
+    "contradictionScope": "shared",
+    "contradictionsMin": 1,
+    "mustContainAny": [
+     "רציני",
+     "מותח"
+    ],
+    "section": "shared"
+   },
+   "id": "cons-he-contradiction",
+   "languages": [
+    "he",
+    "en"
+   ],
+   "seed": {
+    "existingSummary": {
+     "casual": "",
+     "deep": "",
+     "shared": "אוהב קומדיות קלילות וסיטקומים."
+    },
+    "notes": [
+     "נמאס לי מקומדיות — לאחרונה בא לי רק דברים רציניים ומותחים."
+    ],
+    "ratings": []
+   },
+   "uiLang": "he"
+  }
+ ],
+ "ranking": [
+  {
+   "id": "rank-mixed-he",
+   "languages": [
+    "he",
+    "en"
+   ],
+   "seed": {
+    "notes": [
+     "אוהב דרמות מתח וקומדיות קצרות. לא אוהב ריאלטי."
+    ],
+    "ratings": [
+     {
+      "originalLanguage": "en",
+      "rating": "liked",
+      "showTitle": "Breaking Bad",
+      "text": "",
+      "tmdbId": 1396
+     },
+     {
+      "originalLanguage": "en",
+      "rating": "liked",
+      "showTitle": "The Office",
+      "text": "",
+      "tmdbId": 2316
+     },
+     {
+      "originalLanguage": "en",
+      "rating": "liked",
+      "showTitle": "Chernobyl",
+      "text": "",
+      "tmdbId": 87108
+     },
+     {
+      "originalLanguage": "he",
+      "rating": "liked",
+      "showTitle": "Fauda",
+      "text": "",
+      "tmdbId": 69557
+     },
+     {
+      "originalLanguage": "en",
+      "rating": "liked",
+      "showTitle": "South Park",
+      "text": "",
+      "tmdbId": 2190
+     },
+     {
+      "originalLanguage": "en",
+      "rating": "dropped",
+      "showTitle": "The Simpsons",
+      "text": "",
+      "tmdbId": 456
+     }
+    ],
+    "tasteSections": {
+     "casual": "קומדיות קצרות וקלילות לערב.",
+     "deep": "דרמות מתח מורכבות שדורשות ריכוז.",
+     "shared": "אוהב דרמות מתח, פשע וקומדיות. לא אוהב ריאלטי ותוכניות אירוח."
+    }
+   },
+   "uiLang": "he"
+  }
+ ]
+}
