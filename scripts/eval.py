@@ -51,21 +51,39 @@ HELD_OUT = ["Friends", "Brooklyn Nine-Nine", "Modern Family", "Community", "30 R
 SEED_NOTE = "I love witty ensemble comedies with fast dialogue and running gags."
 
 
-def app_request(base_url, method, path, body=None, timeout=60):
-    # workers.dev returns 403 error 1010 for Python-urllib UAs: use a
-    # node-family UA like every other smoke call in this project.
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        base_url + path,
-        data=data,
-        method=method,
-        headers={"User-Agent": "node", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:300]}") from exc
+def app_request(base_url, method, path, body=None, timeout=60, retries=3):
+    # Via curl, not urllib: Python's http.client hits IncompleteRead on
+    # this workers.dev endpoint (responses truncate at the 8 KiB buffer
+    # boundary), while curl reads them fine. Node-family UA: workers.dev
+    # returns 403 error 1010 for Python-urllib UAs.
+    import subprocess
+    import time
+
+    last_exc = None
+    for attempt in range(retries):
+        cmd = ["curl", "-sS", "-A", "node", "--max-time", str(timeout),
+               "-w", "\n%{http_code}", "-X", method, base_url + path]
+        if body is not None:
+            cmd += ["-H", "Content-Type: application/json", "-d", json.dumps(body)]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
+        except Exception as exc:  # noqa: BLE001 - retry transient transport errors
+            last_exc = exc
+            time.sleep(2 * (attempt + 1))
+            continue
+        if out.returncode != 0:
+            last_exc = RuntimeError(f"curl rc={out.returncode}: {out.stderr[:200]}")
+            time.sleep(2 * (attempt + 1))
+            continue
+        payload, _, code = out.stdout.rpartition("\n")
+        if code != "200" and code != "201":
+            raise RuntimeError(f"{method} {path} -> HTTP {code}: {payload[:300]}")
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"{method} {path} failed after {retries} attempts: {last_exc}")
 
 
 def cf_request(method, path, body=None):
@@ -214,8 +232,22 @@ def main():
         if len(accounts) != 1:
             raise RuntimeError(f"expected exactly 1 Cloudflare account, found {len(accounts)}")
         account_id = accounts[0]["id"]
-        w1, r1 = judge_lists(account_id, taste_text, engine, baseline, "engine", "popularity")
-        w2, r2 = judge_lists(account_id, taste_text, baseline, engine, "popularity", "engine")
+        try:
+            w1, r1 = judge_lists(account_id, taste_text, engine, baseline, "engine", "popularity")
+            w2, r2 = judge_lists(account_id, taste_text, baseline, engine, "popularity", "engine")
+        except RuntimeError as exc:
+            # The Cloudflare API token may lack Workers AI permission
+            # (HTTP 401, code 10000 — the same failure D1 calls gave
+            # before D1:Edit was added to the token). The judge step is
+            # then unavailable, but the materials print below so the
+            # check can run by hand or once the token gains permission.
+            print(f"judge step unavailable: {exc}")
+            print("judge materials (taste + lists) for a manual run:")
+            print("TASTE:", taste_text)
+            print("ENGINE:", [t for t, _, _ in engine])
+            print("BASELINE:", [t for t, _, _ in baseline])
+            w1 = w2 = None
+            r1 = r2 = "judge unavailable"
         # Map both verdicts back to engine-vs-baseline.
         v1 = {"A": "engine", "B": "popularity"}.get(w1) if w1 else None
         v2 = {"A": "popularity", "B": "engine"}.get(w2) if w2 else None
@@ -224,7 +256,7 @@ def main():
         if v1 and v2:
             print("agreement:", "yes" if v1 == v2 else "NO — order-sensitive, treat as inconclusive")
         else:
-            print("agreement: inconclusive (a judge call failed to parse)")
+            print("agreement: inconclusive (a judge call failed to parse or was unavailable)")
     finally:
         if args.keep:
             print(f"--keep: temp profile {profile_id} left in place")
