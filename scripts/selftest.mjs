@@ -258,5 +258,192 @@ assert.equal(
   'ko',
 );
 
+// ---------------------------------------------------------------- rerank
+// worker/src/rerank.ts: decay, MMR/calibration/epsilon greedy pass,
+// rank-pass merging, grounded rationales, negative similarity.
+const rerankOutFile = join(root, 'node_modules', '.selftest-rerank.mjs');
+await build({
+  entryPoints: [join(root, 'worker', 'src', 'rerank.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  outfile: rerankOutFile,
+  logLevel: 'silent',
+});
+const rerank = await import(rerankOutFile);
+await unlink(rerankOutFile).catch(() => {});
+
+const NOW = Date.UTC(2026, 10, 15);
+const DAY = 86_400_000;
+// decayWeight: half-life 90 days
+assert.equal(rerank.decayWeight(NOW, NOW), 1);
+assert.ok(Math.abs(rerank.decayWeight(NOW - 90 * DAY, NOW) - 0.5) < 1e-9);
+assert.ok(Math.abs(rerank.decayWeight(NOW - 180 * DAY, NOW) - 0.25) < 1e-9);
+assert.ok(Math.abs(rerank.decayWeight(NOW - 365 * DAY, NOW) - 0.0603) < 0.001);
+assert.equal(rerank.decayWeight(NOW + 5 * DAY, NOW), 1); // future -> no decay
+assert.equal(rerank.TASTE_HALF_LIFE_DAYS, 90);
+
+// buildShortTermTasteText: recent entries only, newest first, floor 0.25
+const logRows = [
+  { kind: 'show', rating: 'liked', showTitle: 'Old Show', text: 'great', createdAt: NOW - 200 * DAY },
+  { kind: 'show', rating: 'liked', showTitle: 'New Show', text: 'funny', createdAt: NOW - 2 * DAY },
+  { kind: 'note', rating: 'like', showTitle: null, text: 'love comedies', createdAt: NOW - 10 * DAY },
+  { kind: 'show', rating: 'dropped', showTitle: 'Meh Show', text: '', createdAt: NOW - 30 * DAY },
+];
+const shortText = rerank.buildShortTermTasteText(logRows, NOW);
+assert.ok(!shortText.includes('Old Show'), '200-day-old entry below the floor is excluded');
+assert.ok(shortText.includes('New Show'));
+assert.ok(shortText.indexOf('New Show') < shortText.indexOf('love comedies'));
+assert.ok(shortText.includes('[dropped] Meh Show'));
+assert.equal(rerank.buildShortTermTasteText(logRows.slice(0, 1), NOW), '');
+assert.equal(rerank.buildShortTermTasteText([], NOW), '');
+
+// freshnessFor: new shows 1, old shows 0, unknown neutral
+assert.equal(rerank.freshnessFor('2026-03-01', NOW), 1);
+assert.equal(rerank.freshnessFor('2025-06-01', NOW), 1);
+assert.ok(rerank.freshnessFor('2010-01-01', NOW) < 0.3);
+assert.equal(rerank.freshnessFor('2000-01-01', NOW), 0);
+assert.equal(rerank.freshnessFor('', NOW), 0.5);
+
+// fitFromRank
+assert.equal(rerank.fitFromRank(0, 10), 1);
+assert.ok(Math.abs(rerank.fitFromRank(9, 10) - 0.1) < 1e-9);
+assert.equal(rerank.fitFromRank(0, 0), 0);
+
+// noveltyFor: identical -> 0, orthogonal -> 1, genre fallback, neutral
+assert.equal(rerank.noveltyFor([1, 0], [35], [[1, 0]], [[35]]), 0);
+assert.equal(rerank.noveltyFor([1, 0], [35], [[0, 1]], [[18]]), 1);
+assert.equal(rerank.noveltyFor(undefined, [35], [], [[35]]), 0);
+assert.equal(rerank.noveltyFor(undefined, [35], [], [[18]]), 1);
+assert.equal(rerank.noveltyFor(undefined, [35], [], []), 0.5);
+
+// calibrationTargetFromLiked: cluster shares sum to 1
+const target = rerank.calibrationTargetFromLiked([[35], [35], [18], [18, 80]]);
+assert.ok(Math.abs([...target.values()].reduce((a, b) => a + b, 0) - 1) < 1e-9);
+assert.equal(target.get('comedy'), 0.5);
+assert.equal(target.get('drama'), 0.5); // [18,80] clusters as drama
+assert.equal(rerank.calibrationTargetFromLiked([]).size, 0);
+
+// deterministicRerank: strict cap, epsilon near-tie swap, MMR split,
+// calibration bonus, determinism, capBound reporting
+const mkItem = (id, fit, cluster, emb, genreIds) => ({
+  tmdbId: id, fit, novelty: 0.5, freshness: 0.5, cluster, embedding: emb, genreIds,
+});
+// Cap: 5 comedy items, cap 3 -> exactly 3 comedy in the order, capBound
+const capItems2 = [
+  mkItem(1, 1.0, 'comedy', [1, 0], [35]),
+  mkItem(2, 0.9, 'comedy', [1, 0.1], [35]),
+  mkItem(3, 0.8, 'comedy', [1, 0.2], [35]),
+  mkItem(4, 0.7, 'comedy', [1, 0.3], [35]),
+  mkItem(5, 0.6, 'comedy', [1, 0.4], [35]),
+  mkItem(6, 0.5, 'drama', [0, 1], [18]),
+];
+const capped = rerank.deterministicRerank(capItems2, 'casual', new Map(), 3);
+assert.equal(capped.ordered.filter((x) => x.cluster === 'comedy').length, 3);
+assert.deepEqual(capped.ordered.map((x) => x.tmdbId), [1, 2, 3, 6]);
+assert.equal(capped.capBound, true);
+// No cap pressure: all items ordered, capBound false
+const free = rerank.deterministicRerank(capItems2.slice(0, 3), 'casual', new Map(), 3);
+assert.equal(free.ordered.length, 3);
+assert.equal(free.capBound, false);
+// Epsilon near-tie: item 2 (fit 0.97) beats item 1 (fit 1.0) on
+// novelty+freshness because it is within epsilon; item 3 (fit 0.5) cannot leap.
+const tieItems = [
+  mkItem(1, 1.0, 'drama', [1, 0], [18]),
+  { tmdbId: 2, fit: 0.97, novelty: 1, freshness: 1, cluster: 'comedy', embedding: [0, 1], genreIds: [35] },
+  { tmdbId: 3, fit: 0.5, novelty: 1, freshness: 1, cluster: 'scifi', embedding: [0, 0.9], genreIds: [10765] },
+];
+const tied = rerank.deterministicRerank(tieItems, 'casual', new Map(), 3);
+assert.equal(tied.ordered[0].tmdbId, 2);
+assert.equal(tied.ordered[2].tmdbId, 3);
+// MMR: two near-identical top-fit items are split by a diverse item
+const mmrItems = [
+  mkItem(1, 1.0, 'drama', [1, 0], [18]),
+  mkItem(2, 0.99, 'drama', [1, 0.001], [18]),
+  mkItem(3, 0.98, 'drama', [0, 1], [18]),
+];
+const mmr = rerank.deterministicRerank(mmrItems, 'deep', new Map(), 3);
+assert.deepEqual(mmr.ordered.map((x) => x.tmdbId), [1, 3, 2]);
+// Calibration: with a 100% comedy target, the comedy item wins the
+// near-tie over the drama item despite equal fit/novelty/freshness.
+const calibItems = [
+  mkItem(1, 1.0, 'drama', [1, 0], [18]),
+  mkItem(2, 1.0, 'comedy', [0, 1], [35]),
+];
+const calibTarget = new Map([['comedy', 1]]);
+const calib = rerank.deterministicRerank(calibItems, 'casual', calibTarget, 3);
+assert.equal(calib.ordered[0].tmdbId, 2);
+// Determinism: same input twice -> same order
+const again = rerank.deterministicRerank(mmrItems, 'deep', new Map(), 3);
+assert.deepEqual(again.ordered.map((x) => x.tmdbId), mmr.ordered.map((x) => x.tmdbId));
+
+// maxNegativeSimilarity / thresholds
+assert.equal(rerank.maxNegativeSimilarity([1, 0], [[1, 0]]), 1);
+assert.equal(rerank.maxNegativeSimilarity([1, 0], [[0, 1]]), 0);
+assert.equal(rerank.maxNegativeSimilarity(undefined, [[1, 0]]), 0);
+assert.equal(rerank.maxNegativeSimilarity([1, 0], []), 0);
+assert.equal(rerank.NEGATIVE_EXCLUSION_COSINE, 0.92);
+assert.equal(rerank.NEGATIVE_DEMOTION_COSINE, 0.85);
+
+// mergeRankPasses: identical passes keep order; reversed second pass
+// averages out; one-pass-only items sink; rationale from better rank
+const e = (id, rationale) => ({ tmdbId: id, rationale, risk: null });
+const m1 = rerank.mergeRankPasses([e(1, 'a'), e(2, 'b'), e(3, 'c')], [e(1, 'a2'), e(2, 'b2'), e(3, 'c2')]);
+assert.deepEqual(m1.map((x) => x.tmdbId), [1, 2, 3]);
+assert.equal(m1[0].rationale, 'a'); // tie -> first pass
+const m2 = rerank.mergeRankPasses(
+  [e(1, 'a'), e(2, 'b'), e(3, 'c'), e(4, 'd')],
+  [e(3, 'c2'), e(2, 'b2'), e(1, 'a2')],
+);
+// Mean normalized ranks: 3 (0.25), 2 (0.29), 1 (0.33), 4 (0.875, one pass only).
+assert.deepEqual(m2.map((x) => x.tmdbId), [3, 2, 1, 4]);
+assert.equal(m2[0].rationale, 'c2'); // 3 ranked better in pass 2
+assert.equal(m2[1].rationale, 'b'); // 2 ranked better in pass 1 (0.25 < 0.33)
+const m3 = rerank.mergeRankPasses([e(1, 'a'), e(2, 'b')], [e(2, 'b2'), e(3, 'c2')]);
+assert.deepEqual(m3.map((x) => x.tmdbId), [2, 1, 3]); // 3 penalized (one pass only)
+assert.equal(m3[0].rationale, 'b2'); // 2 ranked better in pass 2
+assert.deepEqual(rerank.mergeRankPasses([], []), []);
+
+// groundRationale / templateRationale
+assert.equal(
+  rerank.groundRationale('Loved it because Seinfeld fans enjoy this.', 'Seinfeld', ['Comedy'], '1994', 'en'),
+  'Loved it because Seinfeld fans enjoy this.',
+);
+assert.equal(
+  rerank.groundRationale('A funny show from 1994 with great comedy.', 'Seinfeld', ['Comedy'], '1994', 'en'),
+  'A funny show from 1994 with great comedy.', // genre + year cited
+);
+assert.equal(
+  rerank.groundRationale('An amazing show you will love.', 'Seinfeld', ['Comedy'], '1994', 'en'),
+  'Similar to Seinfeld (Comedy, 1994).',
+);
+assert.equal(rerank.groundRationale('', 'Seinfeld', ['Comedy'], '1994', 'en'), 'Similar to Seinfeld (Comedy, 1994).');
+assert.equal(rerank.groundRationale('Great show.', null, ['Drama'], '2021', 'en'), 'Matches your taste (Drama, 2021).');
+assert.equal(rerank.groundRationale('', null, [], '', 'en'), 'Matches your taste profile.');
+assert.equal(
+  rerank.groundRationale('סדרה נהדרת.', 'סיינפלד', ['קומדיה'], '1994', 'he'),
+  'דומה לסיינפלד (קומדיה, 1994).',
+);
+assert.equal(
+  rerank.groundRationale('מזכיר את סיינפלד בקצב.', 'סיינפלד', ['קומדיה'], '1994', 'he'),
+  'מזכיר את סיינפלד בקצב.',
+);
+
+// parseRemovalCheckResponse: validates ids, dedupes, fails open
+assert.deepEqual(util.parseRemovalCheckResponse('{"removeIds": [1, 2]}', new Set([1, 2, 3])), [1, 2]);
+assert.deepEqual(util.parseRemovalCheckResponse('{"removeIds": [1, 999, 1]}', new Set([1, 2])), [1]);
+assert.deepEqual(util.parseRemovalCheckResponse('{"removeIds": []}', new Set([1])), []);
+assert.deepEqual(util.parseRemovalCheckResponse('not json', new Set([1])), []);
+assert.deepEqual(util.parseRemovalCheckResponse('{"removeIds": "nope"}', new Set([1])), []);
+assert.deepEqual(util.parseRemovalCheckResponse('prefix {"removeIds": ["2"]} suffix', new Set([2])), [2]);
+
+// parseRankResponse: invented/duplicate/string ids (hygiene hardening)
+const rankDup = util.parseRankResponse(
+  '{"ranked": [{"tmdbId": "1", "rationale": "a"}, {"tmdbId": 1, "rationale": "b"}, {"tmdbId": 7, "rationale": "c"}]}',
+  new Set([1, 2]),
+);
+assert.deepEqual(rankDup.ranked.map((r) => r.tmdbId), [1]);
+assert.equal(rankDup.ranked[0].rationale, 'a');
+
 await writeFile(join(root, 'node_modules', '.selftest-ok'), 'ok');
 console.log('selftest: all assertions passed');

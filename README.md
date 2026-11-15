@@ -98,23 +98,45 @@ Retrieval, then LLM re-rank:
    localized genre names — see `worker/src/util.ts`), then Llama 3.3 70B
    re-ranks up to 30 per kind into the Top 10 with a rationale each —
    each kind's prompt gets the Shared taste section plus its own
-   section. A bucket the heuristic starves is backfilled from the other
-   bucket's pool; backfilled candidates surface only if the re-rank
-   accepts them. Ids are validated against the offered set: the model
-   can never invent a show.
-   Diversity caps (genre-ID clusters, see `clusterFor`): at most 3
+   section, plus a labeled short-term "recent signals" section (90-day
+   half-life decay; the long-term summary is never decayed away).
+   Two listwise passes run per kind (input order + reversed order) and
+   merge by mean rank, mitigating position bias. A bucket the heuristic
+   starves is backfilled from the other bucket's pool; backfilled
+   candidates surface only if the re-rank accepts them. Ids are
+   validated against the offered set in both passes: the model can
+   never invent a show.
+   A deterministic post-pass (`worker/src/rerank.ts`) then re-orders
+   each list: MMR over embedding similarity, Steck calibration toward
+   the liked-show cluster mix, and a MOSTRA epsilon-rule blend of
+   fit/novelty/freshness (per-kind weights). Diversity caps (genre-ID
+   clusters, see `clusterFor`) bind inside the same pass: at most 3
    shows per cluster per Top 10 — strict, over-cap shows never
    surface, and a cap-shortened list carries a short reason — plus at
    most 12 per cluster in the rank pool. Only the pool cap relaxes on
    narrow pools, so lists are never padded with junk to look varied.
+   Negative feedback is layered (Meta pattern): retrieval excludes
+   near-duplicates of denied/disliked shows by embedding distance,
+   re-ranking demotes strong resemblances to disliked/dropped shows,
+   and a final LLM removal-only check can only remove shortlisted
+   shows resembling a negative example. Rationales are grounded: each
+   cites the anchor show that drove retrieval plus real genres/year,
+   else a template built from real data replaces the LLM text.
 5. Finalists are enriched through the 180-day metadata cache; the ranked
    pool (up to 30) and the Top 10 snapshot are stored per profile.
 
+Held-out evaluation (dev-time only, `scripts/eval.py`): hides recent
+liked shows, measures Recall/NDCG@10, and runs an LLM-as-judge pairwise
+check of the engine list vs a popularity baseline with swapped A/B
+labels. Raw counts only — no p-values or significance claims. See the
+script header for the exposure-bias caveat.
+
 Known v1 limitations:
 
-- List generation is synchronous on GET/refresh (up to ~36 TMDB
-  subrequests + 2 LLM calls; can take up to a minute). If wall-clock
-  limits bite, move generation behind `waitUntil` + polling.
+- List generation is synchronous on GET/refresh (up to ~44 TMDB
+  subrequests on a cold cache + 6 LLM calls in 2 sequential stages;
+  can take up to about a minute). If wall-clock limits bite, move
+  generation behind `waitUntil` + polling.
 - Classification (kind/type/tone/pace/structure) is heuristic from
   genre IDs + runtime; tune from real usage.
 - The embedding model degrades silently to non-embedding signals when
@@ -188,6 +210,9 @@ deploy/              bindings.json — Worker bindings for the upload API
 2. Language hard filter is absolute; taste nuance can only narrow within it.
 3. The raw feedback log is append-only; consolidation never rewrites it.
 4. No "Want to watch" state, button, or queue anywhere.
-5. Deny-list entries are read by list exclusion only — never by ranking,
-   taste consolidation, or trust.
+5. Deny-list entries never feed taste consolidation or trust, and never
+   demote by theme — a "No Reason" deny is not a taste signal. They
+   drive list exclusion only, plus near-duplicate exclusion at
+   retrieval and the removal-only final check (both are exclusion
+   layers, not preference learning).
 6. Rating a show anywhere removes it from both Top 10 lists.

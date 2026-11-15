@@ -8,7 +8,10 @@ import { normalizeTitle, parseTasteSummary, serializeTasteSummary, type TasteSec
  *
  * The deny_list is deliberately absent from every read in this module
  * except loadProfileContext's exclusion set: ranking and trust must
- * never treat a deny as a taste signal (spec build rule 14).
+ * never treat a deny as a taste signal (spec build rule 14). The
+ * engine's layered-negative checks read that exclusion set only to
+ * extend exclusion (near-duplicate exclusion, removal-only check) —
+ * never to infer taste or demote by theme.
  */
 
 export interface ProfileRow {

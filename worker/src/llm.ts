@@ -157,14 +157,27 @@ export interface RankCandidateInput {
   genres: string[];
   originalLanguage: string;
   originCountry: string[];
+  /**
+   * The liked show that actually drove this candidate's retrieval (TMDB
+   * recommendation source, else best genre overlap). A show title — a
+   * factual label, inside the terms guardrail. Rationales must cite it.
+   */
+  anchorTitle?: string;
 }
 
 /**
  * Build the list re-rank prompt. The model sees the taste summary
  * (user-authored) and factual labels per candidate — title, year,
- * genres, language, country. NO overviews, NO descriptions. It ranks
- * ONLY the listed ids and returns JSON; the caller validates every id
- * against the offered set.
+ * genres, language, country, anchor show. NO overviews, NO
+ * descriptions. It ranks ONLY the listed ids and returns JSON; the
+ * caller validates every id against the offered set.
+ *
+ * Grounding discipline (2026-11-15 engine batch): each rationale MUST
+ * name the candidate's anchor show and cite only the listed attributes.
+ * The model must never invent shared cast, creators, themes, or plot
+ * details — anything not in the candidate line does not exist for this
+ * ranking. The caller replaces ungrounded rationales with a template
+ * built from real data (see rerank.groundRationale).
  */
 export function buildRankPrompt(
   tasteText: string,
@@ -179,24 +192,75 @@ export function buildRankPrompt(
   const lines = candidates
     .map(
       (cand) =>
-        `- id ${cand.tmdbId}: "${cand.title}" (${cand.year}) [${cand.genres.join(', ') || 'no genre'}] lang=${cand.originalLanguage} country=${cand.originCountry.join('/') || '?'}`,
+        `- id ${cand.tmdbId}: "${cand.title}" (${cand.year}) [${cand.genres.join(', ') || 'no genre'}] lang=${cand.originalLanguage} country=${cand.originCountry.join('/') || '?'}` +
+        (cand.anchorTitle ? ` anchor="${cand.anchorTitle}"` : ''),
     )
     .join('\n');
   return {
     system:
       'You rank TV shows for a household profile. Rank ONLY the shows listed below, by TMDB id. ' +
-      'Base every judgment ONLY on the taste description and the listed attributes (title, year, genres, language, country). ' +
+      'Output ONLY ids from the candidate list — never output an id, title, or attribute that is not listed. ' +
+      'Base every judgment ONLY on the taste description and the listed attributes (title, year, genres, language, country, anchor show). ' +
       'Balance variety across genres, eras, and countries of origin while staying relevant to the taste text: ' +
       'do not fill the list with near-identical shows (for example all animation, or all sci-fi) when relevant alternatives are listed. ' +
-      'Do NOT invent plot details, cast, or qualities not in the list. Write rationales ONLY in ' +
+      'GROUNDING: every rationale MUST name the candidate\'s anchor show (the anchor="..." value) and cite only the listed genres/year/language. ' +
+      'Do NOT invent plot details, cast, creators, shared themes, or qualities not in the list — if the anchor is missing, cite the listed genres and year instead. ' +
+      'Write rationales ONLY in ' +
       (uiLang === 'he' ? 'Hebrew' : 'English') +
       '. Return ONLY a JSON object, no other text: ' +
-      '{"ranked": [{"tmdbId": 123, "rationale": "one sentence, grounded in the taste text and the listed genres", "risk": "one genuine fit risk grounded in the listed attributes, or null"}], ' +
+      '{"ranked": [{"tmdbId": 123, "rationale": "one sentence naming the anchor show and the listed genres that match the taste text", "risk": "one genuine fit risk grounded in the listed attributes, or null"}], ' +
       '"shortReason": "only when fewer than 10 shows genuinely fit, one sentence why, else null"}. ' +
       'Rank at most 10 shows. Prefer shows that fit the taste text; a show that clashes with a stated dislike must rank last or be omitted.',
     user:
       `Taste description:\n${tasteText}\n\nList kind: ${kindLine}\n\nCandidates:\n${lines}\n\nReturn the ranking JSON.`,
     maxTokens: 1200,
+  };
+}
+
+export interface RemovalCheckNegative {
+  title: string;
+  year: string;
+  genres: string[];
+}
+
+/**
+ * Build the removal-only negative check prompt (layered negative
+ * feedback, final layer — Meta "Your Algorithm" pattern). The model
+ * sees ONLY titles/years/genres: the shows the user disliked, dropped,
+ * or removed, and the shortlisted candidates. NO overviews, NO
+ * descriptions. It returns ONLY the ids to remove; the caller validates
+ * every id against the checked set and can only remove — never add,
+ * reorder, or suggest. When in doubt the model keeps the show, so a
+ * cautious model costs nothing and an aggressive one is bounded by the
+ * checked set. The prompt never asks the model to explain taste — only
+ * resemblance to concrete negative examples.
+ */
+export function buildRemovalCheckPrompt(
+  negatives: RemovalCheckNegative[],
+  candidates: RankCandidateInput[],
+  uiLang: string,
+): LlmRequest {
+  const negLines = negatives
+    .map((n) => `- "${n.title}" (${n.year}) [${n.genres.join(', ') || 'no genre'}]`)
+    .join('\n');
+  const candLines = candidates
+    .map(
+      (cand) =>
+        `- id ${cand.tmdbId}: "${cand.title}" (${cand.year}) [${cand.genres.join(', ') || 'no genre'}] lang=${cand.originalLanguage}`,
+    )
+    .join('\n');
+  return {
+    system:
+      'You check a TV shortlist against shows a user disliked, dropped, or removed. ' +
+      'Return ONLY the ids of shortlisted shows that CLOSELY resemble a negative example in genre, type, and era — near-duplicates, same franchise entries, or shows of the same narrow kind. ' +
+      'A shared broad genre alone is NOT enough to remove. When in doubt, KEEP the show. ' +
+      'You may only remove shows from the shortlist: never add, reorder, or suggest shows, and never output an id that is not listed. ' +
+      'Base every judgment ONLY on the listed titles, years, and genres. ' +
+      'Return ONLY a JSON object, no other text: {"removeIds": [123, 456]}. ' +
+      'An empty list is a valid answer when nothing closely resembles a negative example.',
+    user:
+      `Shows the user disliked, dropped, or removed:\n${negLines}\n\nShortlist to check:\n${candLines}\n\nReturn the removal JSON.`,
+    maxTokens: 300,
   };
 }
 

@@ -447,6 +447,37 @@ export interface Contradiction {
   proposedMerge: string;
 }
 
+/**
+ * Parse the LLM removal-only check response (layered negative feedback,
+ * final layer). Extracts the first JSON object and keeps only ids that
+ * were actually in the checked set — the check can only REMOVE checked
+ * shows, never add, reorder, or invent. Returns [] on any parse failure
+ * (fail-open: the other negative layers still apply).
+ */
+export function parseRemovalCheckResponse(text: string, validIds: Set<number>): number[] {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object') return [];
+  const raw = (parsed as { removeIds?: unknown }).removeIds;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  const removed: number[] = [];
+  for (const item of raw) {
+    const id = typeof item === 'number' ? item : Number(item);
+    if (!Number.isInteger(id) || !validIds.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    removed.push(id);
+  }
+  return removed;
+}
+
 export interface ConsolidationResult {
   /** Combined text (all sections joined) — backward-compatible display. */
   summary: string;

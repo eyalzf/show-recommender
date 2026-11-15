@@ -14,8 +14,25 @@ import {
   searchShows,
   type TmdbSearchResult,
 } from './tmdb';
-import { buildAdhocRationalePrompt, buildRankPrompt, getLlmProvider } from './llm';
+import { buildAdhocRationalePrompt, buildRankPrompt, buildRemovalCheckPrompt, getLlmProvider } from './llm';
 import { candidateEmbedText, embedTexts } from './embeddings';
+import {
+  buildShortTermTasteText,
+  calibrationTargetFromLiked,
+  deterministicRerank,
+  fitFromRank,
+  freshnessFor,
+  groundRationale,
+  LONG_TERM_BLEND_WEIGHT,
+  maxNegativeSimilarity,
+  mergeRankPasses,
+  NEGATIVE_DEMOTION_COSINE,
+  NEGATIVE_DEMOTION_PENALTY,
+  NEGATIVE_EXCLUSION_COSINE,
+  noveltyFor,
+  SHORT_TERM_BLEND_WEIGHT,
+  type RerankCandidate,
+} from './rerank';
 import {
   classifyKind,
   classifyType,
@@ -25,17 +42,17 @@ import {
   normalizeTitle,
   paceFor,
   parseRankResponse,
-  partitionByClusterCap,
+  parseRemovalCheckResponse,
   selectCapped,
   structureFor,
   tasteTextForKind,
   toneFor,
-  type ClusterKey,
   type RankedEntry,
 } from './util';
 
 /**
- * Recommendation engine v1: retrieval, then LLM re-rank.
+ * Recommendation engine v1: retrieval, then LLM re-rank, then a
+ * deterministic post-pass.
  *
  * Retrieval narrows the catalog to a few dozen candidates:
  *   1. hard filters first — profile languages, rated/dropped/deny-listed
@@ -46,32 +63,58 @@ import {
  *   3. retrieval scoring — embedding similarity of the taste summary
  *      against title+genre text (NEVER overviews), popularity, votes,
  *      similar-show and external-rec boosts, genre overlap with likes.
+ *      The taste embedding blends the long-term summary with a
+ *      recency-weighted short-term component (90-day half-life; the
+ *      long-term summary is never decayed away — see rerank.ts).
  *
  * Ranking splits candidates into casual / deep-focus by a genre-ID
  * heuristic (IDs, never localized genre names — see util.ts), then the
  * LLM re-ranks up to 30 per kind into the Top 10 with a rationale each.
- * A bucket the heuristic starves (fewer than 10 primaries) is backfilled
+ * Two listwise passes run per kind (input order + reversed order) and
+ * merge by mean rank, mitigating position bias; every id is validated
+ * against the offered set, so the model can never invent a show. A
+ * bucket the heuristic starves (fewer than 10 primaries) is backfilled
  * from the other bucket's pool so the re-rank — not the heuristic —
  * decides fit; backfilled candidates surface only if the LLM ranks
  * them. Each kind's re-rank prompt gets the Shared taste section plus
- * its own section; retrieval embedding uses all sections joined. Prompts contain user text + factual labels
- * only (see llm.ts terms guardrail). The ranked pool stays larger than
- * 10 so removals promote; fewer than 10 are shown with a reason, never
- * padded.
+ * its own section, plus a labeled "recent signals" section; retrieval
+ * embedding uses all sections joined. Prompts contain user text +
+ * factual labels only (see llm.ts terms guardrail). The ranked pool
+ * stays larger than 10 so removals promote; fewer than 10 are shown
+ * with a reason, never padded.
  *
- * Diversity caps (settled 2026-11-15) keep a Top 10 from collapsing
- * into one type of show: at most 3 shows per genre-ID cluster per list
- * (see clusterFor in util.ts), plus a looser per-cluster cap on the
- * rank pool so one cluster cannot crowd out the rest before ranking.
- * The Top 10 cap is STRICT: over-cap shows never surface, even when
- * that leaves a list short — the short-list reason explains it, and no
- * junk is ever added to fill slots. Only the pool cap relaxes (a small
- * pool keeps all its candidates for ranking; the final cap still
- * binds).
+ * A deterministic post-pass then re-orders each kind's ranked list
+ * (see rerank.deterministicRerank): MMR over embedding similarity,
+ * Steck calibration toward the liked-show cluster mix, and the
+ * MOSTRA epsilon rule for the fit/novelty/freshness blend — with the
+ * strict diversity caps binding inside the same pass. The caps keep a
+ * Top 10 from collapsing into one type of show: at most 3 shows per
+ * genre-ID cluster per list (see clusterFor in util.ts), plus a looser
+ * per-cluster cap on the rank pool so one cluster cannot crowd out the
+ * rest before ranking. The Top 10 cap is STRICT: over-cap shows never
+ * surface, even when that leaves a list short — the short-list reason
+ * explains it, and no junk is ever added to fill slots. Only the pool
+ * cap relaxes (a small pool keeps all its candidates for ranking; the
+ * final cap still binds).
  *
- * Subrequest budget: at most ~36 TMDB calls per generation (free-plan
- * Workers allow 50 per invocation). Finalist details go through the
- * 180-day metadata cache, so repeat generations cost less.
+ * Layered negative feedback (Meta pattern) runs at three stages:
+ * retrieval excludes near-duplicates of denied/disliked shows by
+ * embedding distance (exact-id exclusion always applies, with or
+ * without embeddings); re-ranking demotes strong resemblances to
+ * disliked/dropped shows; a final LLM removal-only check can only
+ * remove shortlisted shows that closely resemble a negative example.
+ * The deny-list feeds ONLY these exclusion layers — never taste
+ * consolidation or trust. Not-watched / not-rated is never negative.
+ *
+ * Rationales are grounded: each cites the anchor show that actually
+ * drove retrieval plus real genres/year; ungrounded LLM text falls back
+ * to a template built from real data (see rerank.groundRationale).
+ *
+ * Subrequest budget: at most ~44 TMDB calls per generation on a cold
+ * metadata cache (free-plan Workers allow 50 per invocation) — the
+ * liked/negative detail fetches for calibration, anchors, and negative
+ * layers are capped (see MAX_LIKED_META / MAX_NEGATIVE_META) and go
+ * through the 180-day cache, so repeat generations cost less.
  */
 
 export interface ListItemOut {
@@ -132,6 +175,21 @@ interface Candidate {
   fromSimilar: boolean;
   fromRec: boolean;
   retrievalScore: number;
+  /** Liked shows whose TMDB recommendations sourced this candidate. */
+  anchorIds: number[];
+  /** Best anchor: a sourcing liked show, else max genre overlap. */
+  anchorTmdbId: number | null;
+  anchorTitle: string | null;
+  /** BGE-M3 vector of title+genre text (for MMR / novelty / negatives). */
+  embedding?: number[];
+  /** Retrieval layer (a): near-duplicate of a denied/disliked show. */
+  nearNegative: boolean;
+  /** Re-rank layer (b): fit penalty for resembling a disliked show. */
+  negativeDemotion: number;
+  /** Novelty objective: distance from already-liked shows (0..1). */
+  novelty: number;
+  /** Freshness objective from first-air year (0..1). */
+  freshness: number;
 }
 
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -151,6 +209,12 @@ const TOP_N = 10;
 const TOP_CLUSTER_CAP = 3;
 /** Max shows per genre-ID cluster in the rank pool (looser than the Top 10 cap). */
 const POOL_CLUSTER_CAP = 12;
+/** Liked-show details fetched for calibration, anchors, and novelty (cached; subrequest budget). */
+const MAX_LIKED_META = 6;
+/** Negative-show details fetched for the layered-negative checks (cached; subrequest budget). */
+const MAX_NEGATIVE_META = 5;
+/** Shortlist size for the final LLM removal-only check: Top 10 + promotion headroom. */
+const REMOVAL_CHECK_SIZE = 15;
 
 function toCandidate(r: TmdbSearchResult, genreMap: Map<number, string>): Candidate {
   return {
@@ -169,6 +233,13 @@ function toCandidate(r: TmdbSearchResult, genreMap: Map<number, string>): Candid
     fromSimilar: false,
     fromRec: false,
     retrievalScore: 0,
+    anchorIds: [],
+    anchorTmdbId: null,
+    anchorTitle: null,
+    nearNegative: false,
+    negativeDemotion: 0,
+    novelty: 0.5,
+    freshness: 0.5,
   };
 }
 
@@ -197,6 +268,24 @@ export function tasteTextForRanking(ctx: ProfileContext, kind?: 'casual' | 'deep
     .map((f) => f.showTitle as string);
   if (droppedTitles.length > 0) parts.push(`Dropped shows: ${droppedTitles.join(', ')}.`);
   return parts.join('\n') || 'No taste notes yet — rank by broad appeal and variety.';
+}
+
+/**
+ * Rank-prompt taste text: the long-term summary (sectioned per kind)
+ * plus an explicitly labeled short-term "recent signals" section, so
+ * the LLM can weigh what changed recently without the latest rating
+ * swamping the long-term profile (the YouTube search-copying caution).
+ * The recent section carries only user-authored feedback text/titles.
+ */
+export function tasteTextForRankingWithRecency(
+  ctx: ProfileContext,
+  kind: 'casual' | 'deep',
+  nowMs: number,
+): string {
+  const longText = tasteTextForRanking(ctx, kind);
+  const recent = buildShortTermTasteText(ctx.feedback, nowMs);
+  if (!recent) return longText;
+  return `${longText}\n\nRecent signals (newest first — what the profile rated or noted lately; weigh these alongside, not instead of, the taste description above):\n${recent}`;
 }
 
 async function retrieveCandidates(
@@ -261,6 +350,9 @@ async function retrieveCandidates(
     ...anchors.map((id) =>
       absorb(() => getShowRecommendations(c, id, uiLang), (cand) => {
         cand.fromSimilar = true;
+        // The sourcing liked show is this candidate's retrieval anchor
+        // (grounded rationales cite it; see assignAnchors).
+        if (!cand.anchorIds.includes(id)) cand.anchorIds.push(id);
       }),
     ),
     ...(topGenreIds.length > 0
@@ -326,24 +418,159 @@ async function retrieveCandidates(
   return [...byId.values()];
 }
 
+/** Factual-label metadata for a rated/denied show, from cached details. */
+interface ShowMeta {
+  tmdbId: number;
+  title: string;
+  genreIds: number[];
+  genreNames: string[];
+  originalLanguage: string;
+  originCountry: string[];
+  year: string;
+}
+
+/**
+ * Fetch cached details for a list of show ids (best-effort, capped by
+ * the caller for the subrequest budget). A failed fetch drops the show
+ * from the meta set — every consumer degrades without it.
+ */
+async function loadShowMeta(
+  c: Context<{ Bindings: Env }>,
+  ids: number[],
+  uiLang: string,
+): Promise<ShowMeta[]> {
+  const metas: ShowMeta[] = [];
+  for (const id of ids) {
+    try {
+      const detail = await getShowDetailCached(c, id, uiLang);
+      metas.push({
+        tmdbId: id,
+        title: detail.name,
+        genreIds: (detail.genres ?? []).map((g) => g.id),
+        genreNames: (detail.genres ?? []).map((g) => g.name),
+        originalLanguage: detail.original_language,
+        originCountry: detail.origin_country ?? [],
+        year: detail.first_air_date ? detail.first_air_date.slice(0, 4) : '',
+      });
+    } catch {
+      // Meta is a soft signal; a failed fetch just skips the show.
+    }
+  }
+  return metas;
+}
+
+/**
+ * Assign each candidate its retrieval anchor: the sourcing liked show
+ * when TMDB recommendations brought it in, else the liked show with the
+ * greatest genre overlap (ties keep the most recently liked). The
+ * anchor title is what grounded rationales cite; null when no liked
+ * show overlaps at all (the template rationale then cites genres/year).
+ */
+function assignAnchors(candidates: Candidate[], likedMeta: ShowMeta[], ctx: ProfileContext): void {
+  const titleById = new Map<number, string>();
+  for (const m of likedMeta) titleById.set(m.tmdbId, m.title);
+  for (const f of ctx.showFeedback) {
+    if (f.rating === 'liked' && f.tmdbId != null && f.showTitle && !titleById.has(f.tmdbId)) {
+      titleById.set(f.tmdbId, f.showTitle);
+    }
+  }
+  for (const cand of candidates) {
+    if (cand.anchorIds.length > 0) {
+      cand.anchorTmdbId = cand.anchorIds[0];
+      cand.anchorTitle = titleById.get(cand.anchorIds[0]) ?? null;
+      continue;
+    }
+    let best: ShowMeta | null = null;
+    let bestOverlap = 0;
+    for (const meta of likedMeta) {
+      const overlap = cand.genreIds.filter((id) => meta.genreIds.includes(id)).length;
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        best = meta;
+      }
+    }
+    if (best && bestOverlap > 0) {
+      cand.anchorTmdbId = best.tmdbId;
+      cand.anchorTitle = best.title;
+    }
+  }
+}
+
 async function scoreCandidates(
   c: Context<{ Bindings: Env }>,
   candidates: Candidate[],
   tasteText: string,
+  shortTermText: string,
   likedGenreIds: Set<number>,
+  likedMeta: ShowMeta[],
+  negativeExclusionMeta: ShowMeta[],
+  negativeDemotionMeta: ShowMeta[],
 ): Promise<void> {
-  // Embedding similarity (degrades to null without an AI binding).
+  // One embedding batch: long-term taste, short-term taste (when any),
+  // every candidate, every negative anchor, every liked anchor. The
+  // blended taste vector (long-term dominant, short-term additive) is
+  // the retrieval query; negative/liked vectors feed the exclusion,
+  // demotion, and novelty layers below.
   let sims: number[] | null = null;
   if (c.env.AI && tasteText.trim()) {
-    const vectors = await embedTexts(c.env.AI, [
-      tasteText,
-      ...candidates.map((cand) =>
-        candidateEmbedText(cand.title, cand.genreNames, cand.originalLanguage, cand.originCountry),
-      ),
-    ]);
-    if (vectors && vectors.length === candidates.length + 1) {
-      const taste = vectors[0];
-      sims = vectors.slice(1).map((v) => (cosine(taste, v) + 1) / 2);
+    const texts: string[] = [tasteText];
+    if (shortTermText.trim()) texts.push(shortTermText);
+    const shortIdx = shortTermText.trim() ? 1 : -1;
+    const candStart = texts.length;
+    for (const cand of candidates) {
+      texts.push(candidateEmbedText(cand.title, cand.genreNames, cand.originalLanguage, cand.originCountry));
+    }
+    const exclStart = texts.length;
+    for (const m of negativeExclusionMeta) {
+      texts.push(candidateEmbedText(m.title, m.genreNames, m.originalLanguage, m.originCountry));
+    }
+    const demStart = texts.length;
+    for (const m of negativeDemotionMeta) {
+      texts.push(candidateEmbedText(m.title, m.genreNames, m.originalLanguage, m.originCountry));
+    }
+    const likedStart = texts.length;
+    for (const m of likedMeta) {
+      texts.push(candidateEmbedText(m.title, m.genreNames, m.originalLanguage, m.originCountry));
+    }
+    const vectors = await embedTexts(c.env.AI, texts);
+    if (vectors && vectors.length === texts.length) {
+      // Blend: long-term at full weight, short-term additive — the
+      // long-term profile is never decayed away (see rerank.ts).
+      let taste = vectors[0];
+      if (shortIdx >= 0) {
+        const short = vectors[shortIdx];
+        taste = taste.map(
+          (v, i) => LONG_TERM_BLEND_WEIGHT * v + SHORT_TERM_BLEND_WEIGHT * (short[i] ?? 0),
+        );
+      }
+      const exclVecs = vectors.slice(exclStart, demStart);
+      const demVecs = vectors.slice(demStart, likedStart);
+      const likedVecs = vectors.slice(likedStart);
+      const likedGenreSets = likedMeta.map((m) => m.genreIds);
+      sims = [];
+      candidates.forEach((cand, i) => {
+        const vec = vectors[candStart + i];
+        cand.embedding = vec;
+        sims?.push((cosine(taste, vec) + 1) / 2);
+        // Layer (a): near-duplicate of a denied/disliked show — excluded
+        // at retrieval. Layer (b): strong resemblance to a disliked or
+        // dropped show — demoted at re-rank. Without embeddings both
+        // layers stay off and exact-id exclusion still applies.
+        const exclSim = maxNegativeSimilarity(vec, exclVecs);
+        if (exclSim >= NEGATIVE_EXCLUSION_COSINE) {
+          cand.nearNegative = true;
+        } else if (maxNegativeSimilarity(vec, demVecs) >= NEGATIVE_DEMOTION_COSINE) {
+          cand.negativeDemotion = NEGATIVE_DEMOTION_PENALTY;
+        }
+        cand.novelty = noveltyFor(vec, cand.genreIds, likedVecs, likedGenreSets);
+      });
+    }
+  }
+  // No-embedding fallback for novelty: genre distance from liked shows.
+  if (!sims) {
+    const likedGenreSets = likedMeta.map((m) => m.genreIds);
+    for (const cand of candidates) {
+      cand.novelty = noveltyFor(undefined, cand.genreIds, [], likedGenreSets);
     }
   }
 
@@ -368,6 +595,16 @@ async function scoreCandidates(
  * borrowed from the other bucket: they surface ONLY if the LLM ranks
  * them — the retrieval-order fill-up below never promotes them, so a
  * starved bucket is never padded with shows the re-rank rejected.
+ *
+ * LLM hygiene (2026-11-15 engine batch): two listwise passes run in
+ * parallel — input order and reversed order — and merge by mean rank
+ * (rerank.mergeRankPasses), mitigating the documented position bias of
+ * listwise re-rankers while keeping listwise comparison quality. Every
+ * id is validated against the offered set in both passes, so an
+ * invented id can never surface; candidates the LLM drops are repaired
+ * from retrieval order below. Rationales are grounded after merging:
+ * each must cite its retrieval anchor or real attributes, else a
+ * template built from real data replaces it.
  * Returns the LLM's own short reason when it ranked fewer than 10.
  */
 async function rankKind(
@@ -382,40 +619,76 @@ async function rankKind(
   const provider = getLlmProvider(c.env);
   const fallbackRationale =
     uiLang === 'he' ? 'תואם את פרופיל הטעם.' : 'Matches your taste profile.';
+  const byId = new Map(candidates.map((cand) => [cand.tmdbId, cand]));
+  const validIds = new Set(candidates.map((cand) => cand.tmdbId));
+  const toInput = (cand: Candidate) => ({
+    tmdbId: cand.tmdbId,
+    title: cand.title,
+    year: cand.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
+    genres: cand.genreNames,
+    originalLanguage: cand.originalLanguage,
+    originCountry: cand.originCountry,
+    anchorTitle: cand.anchorTitle ?? undefined,
+  });
+  const runPass = async (ordered: Candidate[]) => {
+    try {
+      return parseRankResponse(
+        await provider.generate(buildRankPrompt(tasteText, kind, ordered.map(toInput), uiLang)),
+        validIds,
+      );
+    } catch (err) {
+      console.error(`LLM re-rank pass failed for ${kind}`, err);
+      return null;
+    }
+  };
   try {
-    const parsed = parseRankResponse(
-      await provider.generate(
-        buildRankPrompt(
-          tasteText,
-          kind,
-          candidates.map((cand) => ({
-            tmdbId: cand.tmdbId,
-            title: cand.title,
-            year: cand.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
-            genres: cand.genreNames,
-            originalLanguage: cand.originalLanguage,
-            originCountry: cand.originCountry,
-          })),
-          uiLang,
-        ),
-      ),
-      new Set(candidates.map((cand) => cand.tmdbId)),
-    );
-    if (parsed) {
-      const ranked = parsed.ranked.map((r) => ({
-        ...r,
-        rationale: r.rationale || fallbackRationale,
-      }));
+    const [pass1, pass2] = await Promise.all([
+      runPass(candidates),
+      runPass([...candidates].reverse()),
+    ]);
+    const merged =
+      pass1 && pass2
+        ? mergeRankPasses(pass1.ranked, pass2.ranked)
+        : ((pass1 ?? pass2)?.ranked ?? null);
+    const shortReason = pass1?.shortReason ?? pass2?.shortReason ?? null;
+    if (merged) {
+      const ranked = merged.map((r) => {
+        const cand = byId.get(r.tmdbId);
+        return {
+          ...r,
+          rationale: cand
+            ? groundRationale(
+                r.rationale || fallbackRationale,
+                cand.anchorTitle,
+                cand.genreNames,
+                cand.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
+                uiLang,
+              )
+            : r.rationale || fallbackRationale,
+        };
+      });
       const rankedIds = new Set(ranked.map((r) => r.tmdbId));
       // Fill up to the pool size from retrieval order (never invented),
-      // except backfilled candidates the LLM did not rank.
+      // except backfilled candidates the LLM did not rank. Fill-up
+      // entries get grounded template rationales, not the generic
+      // fallback — their anchor/attributes are real data.
       for (const cand of candidates) {
         if (ranked.length >= RANK_POOL_SIZE) break;
         if (rankedIds.has(cand.tmdbId)) continue;
         if (strictIds.has(cand.tmdbId)) continue;
-        ranked.push({ tmdbId: cand.tmdbId, rationale: fallbackRationale, risk: null });
+        ranked.push({
+          tmdbId: cand.tmdbId,
+          rationale: groundRationale(
+            '',
+            cand.anchorTitle,
+            cand.genreNames,
+            cand.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
+            uiLang,
+          ),
+          risk: null,
+        });
       }
-      return { ranked, shortReason: parsed.shortReason };
+      return { ranked, shortReason };
     }
   } catch (err) {
     console.error(`LLM re-rank failed for ${kind}`, err);
@@ -423,9 +696,63 @@ async function rankKind(
   return {
     ranked: candidates
       .filter((cand) => !strictIds.has(cand.tmdbId))
-      .map((cand) => ({ tmdbId: cand.tmdbId, rationale: fallbackRationale, risk: null })),
+      .map((cand) => ({
+        tmdbId: cand.tmdbId,
+        rationale: groundRationale(
+          '',
+          cand.anchorTitle,
+          cand.genreNames,
+          cand.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
+          uiLang,
+        ),
+        risk: null,
+      })),
     shortReason: null,
   };
+}
+
+/**
+ * Final negative layer (c): an LLM removal-only check over the
+ * shortlist head (Top 10 + promotion headroom, so promoted items were
+ * checked too). Returns the ids to remove — validated against the
+ * checked set, so the check can only remove. Fails open (no removals)
+ * when there are no negatives, the call fails, or nothing parses: the
+ * retrieval and demotion layers still apply.
+ */
+async function removalCheck(
+  c: Context<{ Bindings: Env }>,
+  ordered: RankedEntry[],
+  byId: Map<number, Candidate>,
+  negatives: ShowMeta[],
+  uiLang: string,
+): Promise<Set<number>> {
+  if (negatives.length === 0 || ordered.length === 0) return new Set();
+  const checkSet = ordered.slice(0, REMOVAL_CHECK_SIZE);
+  const validIds = new Set(checkSet.map((e) => e.tmdbId));
+  try {
+    const provider = getLlmProvider(c.env);
+    const text = await provider.generate(
+      buildRemovalCheckPrompt(
+        negatives.map((m) => ({ title: m.title, year: m.year, genres: m.genreNames })),
+        checkSet.map((e) => {
+          const cand = byId.get(e.tmdbId);
+          return {
+            tmdbId: e.tmdbId,
+            title: cand?.title ?? '',
+            year: cand?.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
+            genres: cand?.genreNames ?? [],
+            originalLanguage: cand?.originalLanguage ?? '',
+            originCountry: cand?.originCountry ?? [],
+          };
+        }),
+        uiLang,
+      ),
+    );
+    return new Set(parseRemovalCheckResponse(text, validIds));
+  } catch (err) {
+    console.error('removal check failed', err);
+    return new Set();
+  }
 }
 
 async function enrichToListItems(
@@ -526,22 +853,53 @@ export async function generateLists(
 
   const candidates = await retrieveCandidates(c, ctx, uiLang);
   const tasteText = tasteTextForRanking(ctx);
+  const shortTermText = buildShortTermTasteText(ctx.feedback, now);
+
+  // Liked-show metadata (cached details, newest first): genre overlap
+  // for retrieval scoring, calibration target, anchor assignment, and
+  // novelty. Negative-show metadata: denied ids plus disliked/dropped
+  // ratings — the exclusion layer covers both sets, the demotion layer
+  // only disliked/dropped (a "No Reason" deny never demotes by theme).
+  const likedMeta = await loadShowMeta(c, ctx.likedIds.slice(0, MAX_LIKED_META), uiLang);
+  const negativeIds = ctx.showFeedback
+    .filter((f) => f.rating !== 'liked' && f.tmdbId != null)
+    .map((f) => f.tmdbId as number);
+  const demotionMeta = await loadShowMeta(
+    c,
+    [...new Set(negativeIds)].slice(0, MAX_NEGATIVE_META),
+    uiLang,
+  );
+  const exclusionIds = [...new Set([...ctx.denyIds, ...negativeIds])].slice(0, MAX_NEGATIVE_META);
+  // Separate cached load (overlapping ids hit the D1 cache, not TMDB).
+  const exclusionMeta = await loadShowMeta(c, exclusionIds, uiLang);
+
   const likedGenreIds = new Set<number>();
-  for (const id of ctx.likedIds.slice(0, MAX_LIKED_ANCHORS)) {
-    try {
-      const detail = await getShowDetailCached(c, id, uiLang);
-      for (const g of detail.genres ?? []) likedGenreIds.add(g.id);
-    } catch {
-      // Genre overlap is a soft signal; a failed fetch just skips it.
-    }
+  for (const meta of likedMeta.slice(0, MAX_LIKED_ANCHORS)) {
+    for (const id of meta.genreIds) likedGenreIds.add(id);
   }
-  await scoreCandidates(c, candidates, tasteText, likedGenreIds);
+  await scoreCandidates(
+    c,
+    candidates,
+    tasteText,
+    shortTermText,
+    likedGenreIds,
+    likedMeta,
+    exclusionMeta,
+    demotionMeta,
+  );
+
+  // Retrieval-layer negative exclusion (layer a): near-duplicates of
+  // denied/disliked shows never reach the rank pools.
+  const surviving = candidates.filter((cand) => !cand.nearNegative);
+  assignAnchors(surviving, likedMeta, ctx);
+  for (const cand of surviving) cand.freshness = freshnessFor(cand.firstAirDate, now);
+  const calibrationTarget = calibrationTargetFromLiked(likedMeta.map((m) => m.genreIds));
 
   const byScore = (a: Candidate, b: Candidate) => b.retrievalScore - a.retrievalScore;
-  const casualPrimary = candidates
+  const casualPrimary = surviving
     .filter((cand) => classifyKind(cand.genreIds) === 'casual')
     .sort(byScore);
-  const deepPrimary = candidates
+  const deepPrimary = surviving
     .filter((cand) => classifyKind(cand.genreIds) === 'deep')
     .sort(byScore);
 
@@ -572,25 +930,52 @@ export async function generateLists(
   const deepCands = deepBucket.picked;
 
   const [casualRank, deepRank] = await Promise.all([
-    rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRanking(ctx, 'casual'), uiLang),
-    rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRanking(ctx, 'deep'), uiLang),
+    rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'casual', now), uiLang),
+    rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'deep', now), uiLang),
   ]);
-  // Top 10 diversity cap, per list: at most TOP_CLUSTER_CAP shows per
-  // genre-ID cluster, STRICT. Over-cap shows are excluded outright —
-  // they never backfill slots, so a cluster-dominated ranked list
-  // yields a shorter (diverse) list with a reason, never a list that
-  // quietly breaks the cap. Enrichment slices the Top 10 from the
-  // capped order; the stored pool is the capped order too.
-  const capRanked = (ranked: RankedEntry[], pool: Candidate[]) => {
-    const genreIdsById = new Map(pool.map((cand) => [cand.tmdbId, cand.genreIds]));
-    const clusterOf = (entry: RankedEntry): ClusterKey =>
-      clusterFor(genreIdsById.get(entry.tmdbId) ?? []);
-    return partitionByClusterCap(ranked, clusterOf, TOP_CLUSTER_CAP);
+
+  // Deterministic post-LLM pass (MMR + calibration + epsilon blend +
+  // strict caps, one greedy pass — see rerank.deterministicRerank).
+  // Fit comes from the merged LLM rank position, minus the layer-(b)
+  // negative demotion. The pass returns the full pool order; the
+  // snapshot slices the Top 10 from it.
+  interface GreedyEntry extends RerankCandidate {
+    entry: RankedEntry;
+  }
+  const toGreedy = (ranked: RankedEntry[], pool: Candidate[]): GreedyEntry[] => {
+    const byId = new Map(pool.map((cand) => [cand.tmdbId, cand]));
+    return ranked.map((entry, i) => {
+      const cand = byId.get(entry.tmdbId);
+      return {
+        tmdbId: entry.tmdbId,
+        fit: Math.max(0, fitFromRank(i, ranked.length) - (cand?.negativeDemotion ?? 0)),
+        novelty: cand?.novelty ?? 0.5,
+        freshness: cand?.freshness ?? 0.5,
+        cluster: clusterFor(cand?.genreIds ?? []),
+        embedding: cand?.embedding,
+        genreIds: cand?.genreIds ?? [],
+        entry,
+      };
+    });
   };
-  const casualCapped = capRanked(casualRank.ranked, casualCands);
-  const deepCapped = capRanked(deepRank.ranked, deepCands);
-  const casualRanked = casualCapped.picked;
-  const deepRanked = deepCapped.picked;
+  const casualGreedy = deterministicRerank(toGreedy(casualRank.ranked, casualCands), 'casual', calibrationTarget, TOP_CLUSTER_CAP);
+  const deepGreedy = deterministicRerank(toGreedy(deepRank.ranked, deepCands), 'deep', calibrationTarget, TOP_CLUSTER_CAP);
+
+  // Final negative layer (c): removal-only LLM check over each
+  // shortlist head. Removals cannot violate the caps (removal only
+  // shrinks clusters), and promotion headroom was checked too.
+  const casualById = new Map(casualCands.map((cand) => [cand.tmdbId, cand]));
+  const deepById = new Map(deepCands.map((cand) => [cand.tmdbId, cand]));
+  const [casualRemoved, deepRemoved] = await Promise.all([
+    removalCheck(c, casualGreedy.ordered.map((g) => g.entry), casualById, exclusionMeta, uiLang),
+    removalCheck(c, deepGreedy.ordered.map((g) => g.entry), deepById, exclusionMeta, uiLang),
+  ]);
+  const casualRanked = casualGreedy.ordered
+    .filter((g) => !casualRemoved.has(g.tmdbId))
+    .map((g) => g.entry);
+  const deepRanked = deepGreedy.ordered
+    .filter((g) => !deepRemoved.has(g.tmdbId))
+    .map((g) => g.entry);
 
   const [casualItems, deepItems] = await Promise.all([
     enrichToListItems(c, casualRanked, ctx, uiLang),
@@ -601,7 +986,7 @@ export async function generateLists(
     items: ListItemOut[],
     poolSize: number,
     llmReason: string | null,
-    capDeferred: number,
+    capBound: boolean,
   ): string | null => {
     if (items.length >= TOP_N) return null;
     // The re-rank's own reason, when it ranked fewer than 10, is the
@@ -613,7 +998,7 @@ export async function generateLists(
         : 'No shows qualified for this profile’s languages.';
     }
     // The strict variety cap held back relevant same-type shows.
-    if (capDeferred > 0) {
+    if (capBound) {
       return uiLang === 'he'
         ? 'פחות מ־10: מגבלת הגיוון מגבילה סדרות מאותו סוג.'
         : 'Fewer than 10: the variety cap limits shows of the same type.';
@@ -630,7 +1015,7 @@ export async function generateLists(
         score: casualCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
       })),
       snapshot: casualItems,
-      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason, casualCapped.deferred.length),
+      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason, casualGreedy.capBound),
       updatedAt: now,
     },
     deep: {
@@ -639,7 +1024,7 @@ export async function generateLists(
         score: deepCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
       })),
       snapshot: deepItems,
-      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason, deepCapped.deferred.length),
+      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason, deepGreedy.capBound),
       updatedAt: now,
     },
   };
