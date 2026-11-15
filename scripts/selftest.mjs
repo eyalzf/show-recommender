@@ -138,10 +138,18 @@ assert.deepEqual(
   util.selectCapped(capItems, (x) => util.clusterFor(x.g), 3, 5).map((x) => x.id),
   [1, 2, 3, 5, 6],
 );
-assert.deepEqual(
-  util.orderCapped(capItems, (x) => util.clusterFor(x.g), 3).map((x) => x.id),
-  [1, 2, 3, 5, 6, 7, 8, 4],
-);
+// Strict Top 10 selection: ONLY strict picks surface — a slice of the
+// picked list can never exceed the cap, even when the ranked list is
+// cluster-dominated (regression: the old reorder+slice pulled deferred
+// items back in whenever picked < 10).
+const dominated = [
+  { id: 1, g: [35] }, { id: 2, g: [35] }, { id: 3, g: [35] }, { id: 4, g: [35] },
+  { id: 5, g: [35] }, { id: 6, g: [35] }, { id: 7, g: [35] }, { id: 8, g: [18] },
+  { id: 9, g: [99] },
+];
+const strictTop = util.partitionByClusterCap(dominated, (x) => util.clusterFor(x.g), 3).picked.slice(0, 10);
+assert.deepEqual(strictTop.map((x) => x.id), [1, 2, 3, 8, 9]);
+assert.equal(strictTop.filter((x) => util.clusterFor(x.g) === 'comedy').length, 3);
 // Narrow pool: the cap relaxes, deferred items fill the remaining slots
 const narrow = [{ id: 1, g: [16] }, { id: 2, g: [16] }, { id: 3, g: [16] }, { id: 4, g: [16] }];
 assert.deepEqual(

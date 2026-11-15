@@ -23,9 +23,9 @@ import {
   combineTasteSections,
   cosine,
   normalizeTitle,
-  orderCapped,
   paceFor,
   parseRankResponse,
+  partitionByClusterCap,
   selectCapped,
   structureFor,
   tasteTextForKind,
@@ -63,9 +63,11 @@ import {
  * into one type of show: at most 3 shows per genre-ID cluster per list
  * (see clusterFor in util.ts), plus a looser per-cluster cap on the
  * rank pool so one cluster cannot crowd out the rest before ranking.
- * Both caps relax when the pool is genuinely narrow — deferred
- * candidates fill slots no uncapped alternative can fill — so the
- * "fewer than 10 with a reason, never padded" rule still holds.
+ * The Top 10 cap is STRICT: over-cap shows never surface, even when
+ * that leaves a list short — the short-list reason explains it, and no
+ * junk is ever added to fill slots. Only the pool cap relaxes (a small
+ * pool keeps all its candidates for ranking; the final cap still
+ * binds).
  *
  * Subrequest budget: at most ~36 TMDB calls per generation (free-plan
  * Workers allow 50 per invocation). Finalist details go through the
@@ -574,19 +576,21 @@ export async function generateLists(
     rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRanking(ctx, 'deep'), uiLang),
   ]);
   // Top 10 diversity cap, per list: at most TOP_CLUSTER_CAP shows per
-  // genre-ID cluster. Applied as a reorder (capped picks first, deferred
-  // after), so enrichment's Top 10 slice takes the diverse order while
-  // over-cap shows stay available as spares. Deferred items fill slots
-  // only past the slice — i.e. the cap binds whenever enough relevant
-  // alternatives exist, and relaxes on narrow pools.
-  const capRanked = (ranked: RankedEntry[], pool: Candidate[]): RankedEntry[] => {
+  // genre-ID cluster, STRICT. Over-cap shows are excluded outright —
+  // they never backfill slots, so a cluster-dominated ranked list
+  // yields a shorter (diverse) list with a reason, never a list that
+  // quietly breaks the cap. Enrichment slices the Top 10 from the
+  // capped order; the stored pool is the capped order too.
+  const capRanked = (ranked: RankedEntry[], pool: Candidate[]) => {
     const genreIdsById = new Map(pool.map((cand) => [cand.tmdbId, cand.genreIds]));
     const clusterOf = (entry: RankedEntry): ClusterKey =>
       clusterFor(genreIdsById.get(entry.tmdbId) ?? []);
-    return orderCapped(ranked, clusterOf, TOP_CLUSTER_CAP);
+    return partitionByClusterCap(ranked, clusterOf, TOP_CLUSTER_CAP);
   };
-  const casualRanked = capRanked(casualRank.ranked, casualCands);
-  const deepRanked = capRanked(deepRank.ranked, deepCands);
+  const casualCapped = capRanked(casualRank.ranked, casualCands);
+  const deepCapped = capRanked(deepRank.ranked, deepCands);
+  const casualRanked = casualCapped.picked;
+  const deepRanked = deepCapped.picked;
 
   const [casualItems, deepItems] = await Promise.all([
     enrichToListItems(c, casualRanked, ctx, uiLang),
@@ -597,6 +601,7 @@ export async function generateLists(
     items: ListItemOut[],
     poolSize: number,
     llmReason: string | null,
+    capDeferred: number,
   ): string | null => {
     if (items.length >= TOP_N) return null;
     // The re-rank's own reason, when it ranked fewer than 10, is the
@@ -606,6 +611,12 @@ export async function generateLists(
       return uiLang === 'he'
         ? 'לא נמצאו סדרות מתאימות לשפות של הפרופיל.'
         : 'No shows qualified for this profile’s languages.';
+    }
+    // The strict variety cap held back relevant same-type shows.
+    if (capDeferred > 0) {
+      return uiLang === 'he'
+        ? 'פחות מ־10: מגבלת הגיוון מגבילה סדרות מאותו סוג.'
+        : 'Fewer than 10: the variety cap limits shows of the same type.';
     }
     return uiLang === 'he'
       ? `רק ${items.length} סדרות מתאימות כרגע.`
@@ -619,7 +630,7 @@ export async function generateLists(
         score: casualCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
       })),
       snapshot: casualItems,
-      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason),
+      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason, casualCapped.deferred.length),
       updatedAt: now,
     },
     deep: {
@@ -628,7 +639,7 @@ export async function generateLists(
         score: deepCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
       })),
       snapshot: deepItems,
-      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason),
+      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason, deepCapped.deferred.length),
       updatedAt: now,
     },
   };

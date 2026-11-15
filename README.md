@@ -103,10 +103,10 @@ Retrieval, then LLM re-rank:
    accepts them. Ids are validated against the offered set: the model
    can never invent a show.
    Diversity caps (genre-ID clusters, see `clusterFor`): at most 3
-   shows per cluster per Top 10, and at most 12 per cluster in the rank
-   pool. Both caps relax on narrow pools — deferred candidates fill
-   slots no uncapped alternative can fill — so lists are never padded
-   with junk to look varied.
+   shows per cluster per Top 10 — strict, over-cap shows never
+   surface, and a cap-shortened list carries a short reason — plus at
+   most 12 per cluster in the rank pool. Only the pool cap relaxes on
+   narrow pools, so lists are never padded with junk to look varied.
 5. Finalists are enriched through the 180-day metadata cache; the ranked
    pool (up to 30) and the Top 10 snapshot are stored per profile.
 

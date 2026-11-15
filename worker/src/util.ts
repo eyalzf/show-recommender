@@ -277,7 +277,10 @@ export function partitionByClusterCap<T>(
  * Cap-aware selection of at most `limit` items: strict capped picks in
  * ranked order first, then deferred items in ranked order ONLY to fill
  * slots no uncapped candidate can fill (narrow-pool relaxation). Never
- * invents items; a short input stays short.
+ * invents items; a short input stays short. Used ONLY for the rank
+ * pool — the final Top 10 cap takes strict picks alone (see
+ * partitionByClusterCap), so a Top 10 never exceeds the per-cluster
+ * cap.
  */
 export function selectCapped<T>(
   items: T[],
@@ -292,21 +295,6 @@ export function selectCapped<T>(
     out.push(item);
   }
   return out;
-}
-
-/**
- * Cap-aware reorder of the full list: capped picks in ranked order,
- * then deferred items in ranked order. Used where the caller slices
- * afterwards (the Top 10 slice), so over-cap items stay available as
- * spares instead of vanishing.
- */
-export function orderCapped<T>(
-  items: T[],
-  clusterOf: (item: T) => ClusterKey,
-  cap: number,
-): T[] {
-  const { picked, deferred } = partitionByClusterCap(items, clusterOf, cap);
-  return [...picked, ...deferred];
 }
 
 // ---------------------------------------------------------------- taste sections
