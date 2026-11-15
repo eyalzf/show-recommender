@@ -71,36 +71,41 @@ export function ShowDetail({ lang, profile, tmdbId, onBack }: Props) {
   return (
     <section>
       <button type="button" className="btn btn-ghost" onClick={onBack}>{t(lang, 'back')}</button>
-      <h2>{show.title}</h2>
-      {show.posterPath ? (
-        <img
-          src={`https://image.tmdb.org/t/p/w185${show.posterPath}`}
-          alt=""
-          width="124"
-          height="186"
-          loading="lazy"
-        />
-      ) : null}
-      {show.originalTitle !== show.title ? <p className="muted">{show.originalTitle}</p> : null}
-      <div className="chips">
-        {show.genres.map((g) => (
-          <span key={g} className="chip">{g}</span>
-        ))}
-        {show.firstAirDate ? <span className="chip">{show.firstAirDate.slice(0, 4)}</span> : null}
-        {show.numberOfSeasons != null ? <span className="chip">{show.numberOfSeasons} {t(lang, 'seasons')}</span> : null}
-        {show.numberOfEpisodes != null ? <span className="chip">{show.numberOfEpisodes} {t(lang, 'episodes')}</span> : null}
-        {show.episodeRunTime?.[0] ? <span className="chip">{show.episodeRunTime[0]} {t(lang, 'minEps')}</span> : null}
-        {totalHours != null ? <span className="chip">{totalHours}h {t(lang, 'totalHours')}</span> : null}
-        <span className="chip">{show.originalLanguage} · {show.originCountry.join(', ')}</span>
-        {show.status ? <span className="chip">{show.status}</span> : null}
-        {show.autoTranslated ? <span className="chip">auto-translated</span> : null}
+      <div className="detail-hero">
+        {show.posterPath ? (
+          <img
+            className="detail-poster"
+            src={`https://image.tmdb.org/t/p/w185${show.posterPath}`}
+            alt=""
+            width="168"
+            height="252"
+            loading="lazy"
+          />
+        ) : null}
+        <div className="detail-info">
+          <h2>{show.title}</h2>
+          {show.originalTitle !== show.title ? <p className="detail-sub">{show.originalTitle}</p> : null}
+          <div className="chips">
+            {show.genres.map((g) => (
+              <span key={g} className="chip chip-purple">{g}</span>
+            ))}
+            {show.firstAirDate ? <span className="chip">{show.firstAirDate.slice(0, 4)}</span> : null}
+            {show.numberOfSeasons != null ? <span className="chip">{show.numberOfSeasons} {t(lang, 'seasons')}</span> : null}
+            {show.numberOfEpisodes != null ? <span className="chip">{show.numberOfEpisodes} {t(lang, 'episodes')}</span> : null}
+            {show.episodeRunTime?.[0] ? <span className="chip">{show.episodeRunTime[0]} {t(lang, 'minEps')}</span> : null}
+            {totalHours != null ? <span className="chip">{totalHours}h {t(lang, 'totalHours')}</span> : null}
+            <span className="chip chip-teal">{show.originalLanguage} · {show.originCountry.join(', ')}</span>
+            {show.status ? <span className="chip">{show.status}</span> : null}
+            {show.autoTranslated ? <span className="chip">auto-translated</span> : null}
+          </div>
+          <p>{show.overview}</p>
+          <p>
+            <strong>{t(lang, 'detailWatchOn')}:</strong>{' '}
+            {show.originLabel ?? '—'}
+            {show.providers.length > 0 ? ` · ${show.providers.join(' · ')}` : ''}
+          </p>
+        </div>
       </div>
-      <p>{show.overview}</p>
-      <p>
-        <strong>{t(lang, 'detailWatchOn')}:</strong>{' '}
-        {show.originLabel ?? '—'}
-        {show.providers.length > 0 ? ` · ${show.providers.join(' · ')}` : ''}
-      </p>
 
       <h3>{t(lang, 'rate')}</h3>
       <div className="rating-row" role="group" aria-label={t(lang, 'rate')}>

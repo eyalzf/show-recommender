@@ -77,11 +77,16 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
 
   return (
     <section>
-      <p className="muted">
-        {step === 1 ? <strong>1. {t(lang, 'onboardingDetails')}</strong> : <>1. {t(lang, 'onboardingDetails')}</>}
-        {' — '}
-        {step === 2 ? <strong>2. {t(lang, 'onboardingShows')}</strong> : <>2. {t(lang, 'onboardingShows')}</>}
-      </p>
+      <ol className="stepper" aria-label={`${t(lang, 'onboardingDetails')} / ${t(lang, 'onboardingShows')}`}>
+        <li className={`stepper-step${step === 1 ? ' is-current' : ' is-done'}`}>
+          <span className="stepper-dot" aria-hidden="true">{step === 1 ? '1' : '✓'}</span>
+          {t(lang, 'onboardingDetails')}
+        </li>
+        <li className={`stepper-step${step === 2 ? ' is-current' : ''}`}>
+          <span className="stepper-dot" aria-hidden="true">2</span>
+          {t(lang, 'onboardingShows')}
+        </li>
+      </ol>
 
       {profile ? <p className="notice" role="status">{t(lang, 'onboardingResume')}</p> : null}
 

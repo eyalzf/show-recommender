@@ -117,6 +117,7 @@ export function App() {
       <header className="header">
         <div className="header-title">
           <h1>{t(lang, 'appName')}</h1>
+          {lang === 'he' ? <div className="header-sub">SHOW RECOMMENDER</div> : null}
           <p className="muted">{t(lang, 'tagline')}</p>
         </div>
         <div className="header-controls">

@@ -104,20 +104,29 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
     void persist(() => api.deny(profile.id, target.tmdbId));
   };
 
-  const renderList = (title: string, items: ListItem[], reason: string | null) => (
-    <section>
-      <h2>{title}</h2>
-      {items.length === 0 ? <p>{reason ?? t(lang, 'shortListReason')}</p> : null}
-      {items.map((item) => (
-        <ShowCard
-          key={`${title}-${item.tmdbId}-${item.rank}`}
-          item={item}
-          lang={lang}
-          onRemove={setRemoveTarget}
-          onRate={setRateTarget}
-          onOpen={(i) => onOpenShow(i.tmdbId)}
-        />
-      ))}
+  const renderList = (title: string, subEn: string, items: ListItem[], reason: string | null) => (
+    <section className="list-section">
+      <div className="section-head">
+        <h2>{title}</h2>
+        {lang === 'he' ? <div className="section-sub">{subEn}</div> : null}
+        <div className="hairline" aria-hidden="true" />
+      </div>
+      {items.length === 0 ? (
+        <p>{reason ?? t(lang, 'shortListReason')}</p>
+      ) : (
+        <div className="list-grid">
+          {items.map((item) => (
+            <ShowCard
+              key={`${title}-${item.tmdbId}-${item.rank}`}
+              item={item}
+              lang={lang}
+              onRemove={setRemoveTarget}
+              onRate={setRateTarget}
+              onOpen={(i) => onOpenShow(i.tmdbId)}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 
@@ -125,6 +134,7 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
     <div>
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
       {notice ? <p className="notice" role="status">{notice}</p> : null}
+      <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
       <p>
         {t(lang, 'updated')}: {updatedAt ?? t(lang, 'neverUpdated')}{' '}
         <button type="button" className="btn btn-ghost" onClick={() => load(true)} disabled={generating}>
@@ -132,8 +142,8 @@ export function Home({ lang, profile, onOpenShow, onAdhoc }: Props) {
         </button>
       </p>
       {generating ? <p>{t(lang, 'listsGenerating')}</p> : null}
-      {renderList(t(lang, 'casualTitle'), casual, casualReason)}
-      {renderList(t(lang, 'deepTitle'), deep, deepReason)}
+      {renderList(t(lang, 'casualTitle'), 'Casual Top 10', casual, casualReason)}
+      {renderList(t(lang, 'deepTitle'), 'Deep Focus Top 10', deep, deepReason)}
       <button type="button" className="btn" onClick={onAdhoc}>
         {t(lang, 'askAdhoc')}
       </button>

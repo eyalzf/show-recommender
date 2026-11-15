@@ -6,6 +6,7 @@ import { t } from '../i18n';
 import { RatingDialog } from './Dialogs';
 
 const POSTER_THUMB = 'https://image.tmdb.org/t/p/w92';
+const POSTER_GRID = 'https://image.tmdb.org/t/p/w185';
 
 interface ShowPickerProps {
   lang: UiLang;
@@ -57,17 +58,55 @@ function SearchRow({
       {hit.posterPath ? (
         <img src={`${POSTER_THUMB}${hit.posterPath}`} alt="" width="46" height="69" loading="lazy" />
       ) : (
-        <span aria-hidden="true">🎬</span>
+        <span className="poster-thumb-fallback" aria-hidden="true" />
       )}
       <span className="search-row-title">
-        {hit.title}
-        {hit.originalTitle && hit.originalTitle !== hit.title ? ` (${hit.originalTitle})` : ''}
-        {meta ? <span className="muted"> — {meta}</span> : null}
+        <span className="search-row-name">{hit.title}</span>
+        {hit.originalTitle && hit.originalTitle !== hit.title ? (
+          <span className="search-row-sub">{hit.originalTitle}</span>
+        ) : null}
+        {meta ? <span className="search-row-meta">{meta}</span> : null}
       </span>
       <button type="button" className="btn" onClick={() => onRate(hit)}>
         {ratedRating ? t(lang, ratedRating) : t(lang, 'rate')}
       </button>
     </li>
+  );
+}
+
+/** One quick-pick poster card: full-bleed poster, title, year + vote, Rate. */
+function QuickPickCard({
+  hit,
+  lang,
+  ratedRating,
+  onRate,
+}: {
+  hit: SearchHit;
+  lang: UiLang;
+  ratedRating: Rating | null;
+  onRate: (hit: SearchHit) => void;
+}) {
+  const year = yearOf(hit.firstAirDate);
+  const meta = [year, hit.voteCount > 0 ? `★ ${hit.voteAverage.toFixed(1)}` : '']
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <article className="quick-card">
+      {hit.posterPath ? (
+        <img className="quick-card-poster" src={`${POSTER_GRID}${hit.posterPath}`} alt="" loading="lazy" />
+      ) : (
+        <div className="quick-card-fallback" aria-hidden="true">
+          {hit.title.charAt(0)}
+        </div>
+      )}
+      <div className="quick-card-body">
+        <div className="quick-card-title">{hit.title}</div>
+        {meta ? <div className="quick-card-meta">{meta}</div> : null}
+        <button type="button" className="btn btn-sm" onClick={() => onRate(hit)}>
+          {ratedRating ? t(lang, ratedRating) : t(lang, 'rate')}
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -264,9 +303,9 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
           {quickPicksFailed ? <p className="error-note" role="alert">{t(lang, 'searchError')}</p> : null}
           {quickPicks !== null && quickPicks.length === 0 ? <p>{t(lang, 'quickPicksEmpty')}</p> : null}
           {quickPicks !== null && quickPicks.length > 0 ? (
-            <ul className="search-results">
+            <div className="quick-grid">
               {quickPicks.map((hit) => (
-                <SearchRow
+                <QuickPickCard
                   key={hit.tmdbId}
                   hit={hit}
                   lang={lang}
@@ -274,7 +313,7 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
                   onRate={(h) => setRatingTarget(h)}
                 />
               ))}
-            </ul>
+            </div>
           ) : null}
         </>
       ) : (
