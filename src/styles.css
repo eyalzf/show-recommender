@@ -312,14 +312,14 @@ input[type="file"] { font-size: 0.9rem; }
   display: flex; flex-direction: column; gap: 4px; flex: 1;
   background: var(--card-deep);
 }
-.rail-card-title { margin: 0; font-size: 1rem; font-weight: 800; line-height: 1.25; }
+.rail-card-title { margin: 0; font-size: 1rem; font-weight: 800; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .rail-card-sub {
   font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .rail-card-rating { color: var(--gold-text); font-size: 0.85rem; font-weight: 700; }
 .rail-card-meta { color: var(--dim); font-size: 0.78rem; font-weight: 500; }
-.rail-card-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.rail-card-actions { display: flex; gap: 6px; margin-top: auto; padding-top: 8px; flex-wrap: wrap; }
 
 /* Rail skeleton row: same shape as the rail, no scrolling. */
 .rail-skeletons { display: flex; gap: 14px; margin-top: 16px; overflow: hidden; }
