@@ -190,11 +190,11 @@ export interface ConsolidationNote {
  * sections (Shared / Casual / Deep focus), any same-section
  * contradictions it spotted, a language conflict when the notes
  * praise a language outside the profile's hard filter, and derived
- * HARD EXCLUSIONS (genre ids from the fixed TMDB list + an optional
- * year range) for categorical, category-level rejections. The caller
- * validates every exclusion against the fixed lists and drops
- * anything invalid (see util.validateHardExcludes) — the model can
- * only ever exclude what the fixed list allows.
+ * PREFERENCE RULES (dimension + operator + value + mode) for every
+ * rule-shaped statement. The caller validates every rule against
+ * the fixed lists and drops anything invalid (see
+ * util.validateRules) — the model can only ever emit what the
+ * fixed lists allow.
  *
  * Routing rules (the default-to-Shared rule is load-bearing: on any
  * ambiguity the statement stays Shared, which is exactly the old
@@ -241,20 +241,27 @@ export function buildConsolidationPrompt(
       'CONTRADICTIONS are scoped: list one ONLY when a newer note genuinely conflicts with the current summary or an older note WITHIN THE SAME SECTION. ' +
       'A Casual statement and a Deep-focus statement that look opposed (e.g. "nothing slow" for casual vs "love a slow burn" for deep focus) are NOT a contradiction — they coexist in different sections, never flag them. ' +
       'Each contradiction carries its scope, and the proposed merge must honor both sides within that scope. ' +
-      'HARD EXCLUSIONS — derive ONLY from categorical, category-level rejections in the notes: wording that rejects a WHOLE genre or era, such as "never", "no", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי"), applied to a genre name or an explicit year/era boundary ("nothing before 2000", "only 90s shows", "משנות ה-2000 ואילך"). ' +
-      'Output genre ids ONLY from this fixed list, never any other id: ' +
+      'RULES — from every statement that names a concrete, checkable constraint, extract one rule per constraint: {"dimension", "operator", "value", "mode"}. ' +
+      'Dimensions and their values: ' +
+      'genre — value is a genre id from this fixed list ONLY, operators is/isNot: ' +
       genreList +
-      '. Never invent a genre: horror, musical, thriller-as-genre, and anything else not in the list stays in the prose summary and NEVER appears in hardExcludes. ' +
-      'Mild or comparative wording ("prefer less", "not usually", "less interested", "מעדיף פחות") NEVER becomes a hard exclusion — it stays in the prose summary. ' +
-      'A rejection of a SPECIFIC show is NOT a hard exclusion (per-show feedback already handles it) — only whole-category rejections qualify. ' +
-      'Recompute from the FULL log every time: if a newer note retracts an old rejection, the exclusion is REMOVED — never carry an exclusion forward that the current notes no longer support. ' +
-      'WHEN IN DOUBT, omit the exclusion. An empty hardExcludes is always safe; a wrong one hides shows the user would like. ' +
-      'Years are integers only: "nothing before 2000" means minYear 2000; "only shows from the 90s" means minYear 1990 and maxYear 1999; no year wording means both null. ' +
+      '. year — value is an integer year, operators gte/lte: "nothing before 2000" is year gte 2000; "only shows from the 90s" is TWO rules, year gte 1990 AND year lte 1999. ' +
+      'country — value is an ISO 3166-1 alpha-2 code (US, GB, IL, KR, ES, FR, DE, ...), operators is/isNot: "no American shows" is country isNot US. ' +
+      'status — value is EXACTLY one of: "Returning Series", "Planned", "In Production", "Ended", "Canceled", "Pilot", operators is/isNot: "only finished shows" is status is Ended; "no ongoing shows" is TWO rules, status isNot "Returning Series" AND status isNot "In Production". ' +
+      'seasons — value is an integer season count, operators gte/lte: "at least 3 seasons" is seasons gte 3; "no more than 2 seasons" is seasons lte 2. ' +
+      'episodeMinutes — value is an integer episode length in minutes, operators gte/lte: "episodes under 30 minutes" is episodeMinutes lte 30. ' +
+      'One statement may yield several rules ("short comedies from the 90s" yields three). ' +
+      'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק"). ' +
+      'Everything else rule-shaped is soft: "prefer", "love", "like", "more of", "lean toward", "מעדיף/ה", "אוהב/ת". ' +
+      'Mild or comparative wording ("prefer less", "not usually", "מעדיף פחות") becomes a SOFT rule with the negated operator, never hard. ' +
+      'NO RULE when: the statement names no concrete dimension or value (vague: "character-driven", "well-written", "good shows"); it rejects a SPECIFIC show (per-show feedback handles that); it is about LANGUAGE (the profile language filter owns language — keep it in the prose summary only); or it names a category with no fixed value (horror, musical, thriller-as-genre have no genre id — prose only, NEVER invent an id). ' +
+      'Recompute from the FULL log every time: if a newer note retracts an old statement, its rule is REMOVED — never carry a rule forward that the current notes no longer support. On a genuine conflict the NEWEST statement wins for rules (and flag the contradiction as usual). ' +
+      'WHEN IN DOUBT, omit the rule. An empty rules array is always safe; a wrong rule hides or mis-ranks shows the user would like. ' +
       'Return ONLY a JSON object with this shape, no other text: ' +
       '{"summary": {"shared": "...", "casual": "...", "deep": "..."}, "contradictions": [{"scope": "shared", "oldText": "...", "newText": "...", "proposedMerge": "..."}], ' +
       '"languageConflict": {"languageCode": "ko", "languageName": "Korean"} or null, ' +
-      '"hardExcludes": {"genres": [10764], "minYear": null, "maxYear": null}}. ' +
-      'hardExcludes is ALWAYS present; empty means {"genres": [], "minYear": null, "maxYear": null}. ' +
+      '"rules": [{"dimension": "genre", "operator": "isNot", "value": 10764, "mode": "hard"}]}. ' +
+      'rules is ALWAYS present; empty means []. ' +
       'Empty sections are empty strings. ' +
       'Set languageConflict only when the notes praise a language ' +
       `NOT in this allowed list: [${allowedLanguages.join(', ')}]. ` +
@@ -262,7 +269,7 @@ export function buildConsolidationPrompt(
     user:
       (existingText ? `Current summary:\n${existingText}\n\n` : 'No current summary.\n\n') +
       `Raw notes (user-authored, newest last):\n${notes}\n\nWrite the updated consolidated taste description as the JSON object.`,
-    maxTokens: 1000,
+    maxTokens: 1200,
   };
 }
 

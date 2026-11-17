@@ -15,18 +15,23 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** One preference rule derived from the profile's notes (see worker util.ts). */
+export interface PreferenceRule {
+  dimension: 'genre' | 'year' | 'country' | 'status' | 'seasons' | 'episodeMinutes';
+  operator: 'is' | 'isNot' | 'gte' | 'lte';
+  value: number | string;
+  mode: 'hard' | 'soft';
+}
+
 export interface TasteResponse {
   stub?: boolean;
   summary: string;
   sections: TasteSections;
   summaryLanguage: string;
-  /** Derived hard exclusions (genres + year range), with localized genre labels. */
-  hardExcludes?: {
-    genres: number[];
-    genreLabels: string[];
-    minYear: number | null;
-    maxYear: number | null;
-  };
+  /** Derived preference rules (hard = filter, soft = ranking signal). */
+  rules?: PreferenceRule[];
+  /** Localized genre labels for genre rules, keyed by genre id. */
+  genreLabels?: Record<string, string>;
   notes: { id: string; kind: string; text: string; createdAt: number }[];
   contradiction: TasteContradiction | null;
   languageConflict: { praisedLanguage: string; languageCode?: string; message: string } | null;

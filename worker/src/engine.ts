@@ -45,7 +45,7 @@ import {
   clusterFor,
   combineTasteSections,
   cosine,
-  EMPTY_HARD_EXCLUDES,
+  EMPTY_DETAIL_FACTS,
   ensureLanguageMinimums,
   genreDiscoverPlans,
   languagePoolMinimum,
@@ -53,13 +53,16 @@ import {
   paceFor,
   parseRankResponse,
   parseRemovalCheckResponse,
-  passesHardExcludes,
+  passesHardRules,
   primaryDiscoverPlans,
   selectCapped,
+  softRuleScore,
   structureFor,
   tasteTextForKind,
   toneFor,
   type RankedEntry,
+  type ShowDetailFacts,
+  type ShowFacts,
 } from './util';
 
 /**
@@ -69,7 +72,9 @@ import {
  * Retrieval narrows the catalog to a few dozen candidates:
  *   1. hard filters first — profile languages, rated/dropped/deny-listed
  *      shows excluded, override-excluded duplicates excluded, and the
- *      profile's derived hard exclusions (genres + year range) applied;
+ *      profile's derived HARD preference rules (retrieval dimensions)
+ *      applied; detail-dimension hard rules filter the rank pool
+ *      after a cached detail enrichment (see generateLists);
  *   2. candidate sources — TMDB discover ONCE PER PROFILE LANGUAGE
  *      (popularity within that language; a combined-language discover
  *      buried non-English shows entirely — see util.ts), trending,
@@ -212,6 +217,24 @@ interface Candidate {
   novelty: number;
   /** Freshness objective from first-air year (0..1). */
   freshness: number;
+  /** Detail facts (status/seasons/episode minutes), attached by the
+   * pool enrichment when a detail-dimension rule exists; absent
+   * means unknown (rules fail open / score neutral). */
+  detailFacts?: ShowDetailFacts;
+}
+
+/** The facts a preference rule matches against, for one candidate. */
+function factsForCandidate(cand: Candidate): ShowFacts {
+  const year = cand.firstAirDate ? Number(cand.firstAirDate.slice(0, 4)) : NaN;
+  const detail = cand.detailFacts ?? EMPTY_DETAIL_FACTS;
+  return {
+    genreIds: cand.genreIds,
+    year: Number.isInteger(year) ? year : null,
+    originCountry: cand.originCountry,
+    status: detail.status,
+    seasons: detail.seasons,
+    episodeMinutes: detail.episodeMinutes,
+  };
 }
 
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -321,11 +344,13 @@ async function retrieveCandidates(
     ...ctx.denyIds,
     ...ctx.excludedIds,
   ]);
-  // Derived hard exclusions (genres + year range from the profile's
-  // own categorical rejections) filter at ingestion, like languages:
-  // excluded shows never enter the pool, so their slots go to other
-  // candidates instead of shortening the lists.
-  const hardExcludes = ctx.hardExcludes;
+  // Derived HARD preference rules filter at ingestion, like
+  // languages: excluded shows never enter the pool, so their slots
+  // go to other candidates instead of shortening the lists. At this
+  // stage only retrieval dimensions bind (genre/year/country) — the
+  // detail facts are unknown, so detail-dimension rules pass open
+  // here and bind at the pool stage instead (see generateLists).
+  const rules = ctx.rules;
   const genreMap = await getGenreMap(c, uiLang).catch(() => new Map<number, string>());
 
   const byId = new Map<number, Candidate>();
@@ -340,7 +365,7 @@ async function retrieveCandidates(
           mark(existing);
         } else {
           const cand = toCandidate(r, genreMap);
-          if (!passesHardExcludes(cand, hardExcludes)) continue;
+          if (!passesHardRules(factsForCandidate(cand), rules)) continue;
           mark(cand);
           byId.set(r.id, cand);
         }
@@ -407,7 +432,7 @@ async function retrieveCandidates(
           if (existing) existing.fromRec = true;
           else {
             const cand = toCandidate(detail, genreMap);
-            if (passesHardExcludes(cand, hardExcludes)) {
+            if (passesHardRules(factsForCandidate(cand), rules)) {
               cand.fromRec = true;
               byId.set(rec.tmdbId, cand);
             }
@@ -430,7 +455,7 @@ async function retrieveCandidates(
           if (existing) existing.fromRec = true;
           else {
             const cand = toCandidate(hit, genreMap);
-            if (passesHardExcludes(cand, hardExcludes)) {
+            if (passesHardRules(factsForCandidate(cand), rules)) {
               cand.fromRec = true;
               byId.set(hit.id, cand);
             }
@@ -972,8 +997,43 @@ export async function generateLists(
   };
   const casualBucket = buildRankPool(casualPrimary, deepPrimary);
   const deepBucket = buildRankPool(deepPrimary, casualPrimary);
-  const casualCands = casualBucket.picked;
-  const deepCands = deepBucket.picked;
+  let casualCands = casualBucket.picked;
+  let deepCands = deepBucket.picked;
+
+  // Stage-2 rule filtering + soft-rule facts: detail dimensions
+  // (status/seasons/episodeMinutes) need show detail, fetched once
+  // per pool show through the 180-day cache and shared by both kind
+  // pools (the Candidate objects are shared references). A failed
+  // fetch leaves the facts unknown, which fails open for hard rules
+  // and scores neutral for soft rules — enrichment never drops a
+  // show. Skipped entirely when no rule needs detail facts, so
+  // rule-less profiles pay no extra fetches.
+  const DETAIL_RULE_DIMS = new Set(['status', 'seasons', 'episodeMinutes']);
+  const hardDetailRules = ctx.rules.some((r) => r.mode === 'hard' && DETAIL_RULE_DIMS.has(r.dimension));
+  const softDetailRules = ctx.rules.some((r) => r.mode === 'soft' && DETAIL_RULE_DIMS.has(r.dimension));
+  if (hardDetailRules || softDetailRules) {
+    const union = new Map<number, Candidate>();
+    for (const cand of [...casualCands, ...deepCands]) union.set(cand.tmdbId, cand);
+    await Promise.all(
+      [...union.values()].map(async (cand) => {
+        try {
+          const detail = await getShowDetailCached(c, cand.tmdbId, uiLang);
+          const resolved = resolveDetail(detail, null, uiLang, []);
+          cand.detailFacts = {
+            status: resolved.status,
+            seasons: resolved.numberOfSeasons,
+            episodeMinutes: resolved.episodeRunTime?.[0] ?? null,
+          };
+        } catch (err) {
+          console.error(`detail enrichment failed for ${cand.tmdbId}`, err);
+        }
+      }),
+    );
+  }
+  if (hardDetailRules) {
+    casualCands = casualCands.filter((cand) => passesHardRules(factsForCandidate(cand), ctx.rules));
+    deepCands = deepCands.filter((cand) => passesHardRules(factsForCandidate(cand), ctx.rules));
+  }
 
   const [casualRank, deepRank] = await Promise.all([
     rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'casual', now), uiLang),
@@ -997,6 +1057,7 @@ export async function generateLists(
         fit: Math.max(0, fitFromRank(i, ranked.length) - (cand?.negativeDemotion ?? 0)),
         novelty: cand?.novelty ?? 0.5,
         freshness: cand?.freshness ?? 0.5,
+        rules: cand ? softRuleScore(factsForCandidate(cand), ctx.rules) : 0,
         cluster: clusterFor(cand?.genreIds ?? []),
         embedding: cand?.embedding,
         genreIds: cand?.genreIds ?? [],
@@ -1108,7 +1169,7 @@ export async function generateAdhocPick(
     ...(ctx?.excludedIds ?? []),
   ]);
   const genreMap = await getGenreMap(c, uiLang).catch(() => new Map<number, string>());
-  const hardExcludes = ctx?.hardExcludes ?? EMPTY_HARD_EXCLUDES;
+  const rules = ctx?.rules ?? [];
   const byId = new Map<number, Candidate>();
   const absorb = (results: TmdbSearchResult[]) => {
     for (const r of results) {
@@ -1116,7 +1177,7 @@ export async function generateAdhocPick(
       if (languages.length > 0 && !languages.includes(r.original_language)) continue;
       if (byId.has(r.id)) continue;
       const cand = toCandidate(r, genreMap);
-      if (!passesHardExcludes(cand, hardExcludes)) continue;
+      if (!passesHardRules(factsForCandidate(cand), rules)) continue;
       byId.set(r.id, cand);
     }
   };

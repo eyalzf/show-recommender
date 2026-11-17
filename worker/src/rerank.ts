@@ -146,6 +146,15 @@ export const RERANK_WEIGHTS: Record<'casual' | 'deep', RerankWeights> = {
   deep: { fit: 0.7, novelty: 0.2, freshness: 0.1, calibration: 0.15 },
 };
 
+/**
+ * Weight of the soft preference-rule score in the greedy objective.
+ * The rule score is -1..1 (see util.softRuleScore), so a rule can
+ * move a candidate by at most ±0.1 — enough to tip near-ties, never
+ * enough to override fit. Additive, not part of RERANK_WEIGHTS, so
+ * profiles with no soft rules (score 0) see byte-identical ranking.
+ */
+export const RULES_BONUS_WEIGHT = 0.1;
+
 /** Freshness: full score for shows up to 1 year old, then linear decay. */
 export const FRESHNESS_FULL_YEARS = 1;
 export const FRESHNESS_DECAY_YEARS = 14;
@@ -224,6 +233,8 @@ export interface RerankCandidate {
   fit: number;
   novelty: number;
   freshness: number;
+  /** Soft preference-rule score -1..1 (0 = no soft rule applies). */
+  rules?: number;
   cluster: ClusterKey;
   embedding?: number[];
   genreIds: number[];
@@ -282,7 +293,8 @@ export function deterministicRerank<T extends RerankCandidate>(
         weights.fit * it.fit +
         weights.novelty * it.novelty +
         weights.freshness * it.freshness +
-        weights.calibration * calibGain -
+        weights.calibration * calibGain +
+        RULES_BONUS_WEIGHT * (it.rules ?? 0) -
         (1 - MMR_LAMBDA) * maxSim;
       if (score > bestScore) {
         bestScore = score;

@@ -224,82 +224,201 @@ assert.deepEqual(util.parseTasteSummary(stored), { shared: 's', casual: 'c', dee
 assert.equal(util.serializeTasteSummary({ shared: 'only shared', casual: '', deep: '' }), 'only shared');
 assert.equal(util.serializeTasteSummary({ shared: '', casual: '', deep: '' }), '');
 
-// --- derived hard exclusions: fixed list + validation ---
+// --- preference rules: fixed lists + validation ---
 assert.equal(util.TMDB_TV_GENRES.length, 16);
 assert.ok(util.TMDB_TV_GENRES.some((g) => g.id === 10764 && g.name === 'Reality'));
-assert.deepEqual(
-  util.validateHardExcludes({ genres: [10764, 35], minYear: 2000, maxYear: null }),
-  { genres: [35, 10764], minYear: 2000, maxYear: null },
-);
-assert.deepEqual(
-  util.validateHardExcludes({ genres: [10764, 99999, 35, 35, 'x'] }),
-  { genres: [35, 10764], minYear: null, maxYear: null }, // unknown + dup + non-number dropped
-);
-assert.deepEqual(
-  util.validateHardExcludes({ genres: [], minYear: 1800, maxYear: 3000 }),
-  { genres: [], minYear: null, maxYear: null }, // out-of-range years dropped
-);
-assert.deepEqual(
-  util.validateHardExcludes({ genres: [], minYear: 2010, maxYear: 2000 }),
-  { genres: [], minYear: null, maxYear: null }, // inverted range drops both years
-);
-assert.deepEqual(util.validateHardExcludes(null), { genres: [], minYear: null, maxYear: null });
-assert.deepEqual(util.validateHardExcludes('nope'), { genres: [], minYear: null, maxYear: null });
-assert.deepEqual(util.validateHardExcludes({ genres: [10764.5] }), { genres: [], minYear: null, maxYear: null });
+assert.equal(util.TMDB_TV_STATUSES.length, 6);
+assert.ok(util.TMDB_TV_STATUSES.includes('Ended'));
+assert.ok(util.TMDB_TV_STATUSES.includes('Returning Series'));
+assert.equal(util.ISO_COUNTRY_CODES.size, 251);
+assert.ok(util.ISO_COUNTRY_CODES.has('US') && util.ISO_COUNTRY_CODES.has('IL'));
 
-// --- taste record round-trips (sections + exclusions) ---
-const exclRecord = {
+const R = (dimension, operator, value, mode) => ({ dimension, operator, value, mode });
+assert.deepEqual(
+  util.validateRules([
+    R('genre', 'isNot', 10764, 'hard'),
+    R('year', 'gte', 2000, 'hard'),
+    R('country', 'is', 'KR', 'soft'),
+    R('status', 'is', 'Ended', 'hard'),
+    R('seasons', 'gte', 3, 'soft'),
+    R('episodeMinutes', 'lte', 30, 'soft'),
+  ]),
+  [
+    R('genre', 'isNot', 10764, 'hard'),
+    R('year', 'gte', 2000, 'hard'),
+    R('country', 'is', 'KR', 'soft'),
+    R('status', 'is', 'Ended', 'hard'),
+    R('seasons', 'gte', 3, 'soft'),
+    R('episodeMinutes', 'lte', 30, 'soft'),
+  ],
+);
+// Unknown genre id, wrong operator for the dimension, bad country
+// code, bad status, out-of-range numerics: all dropped.
+assert.deepEqual(
+  util.validateRules([
+    R('genre', 'isNot', 99999, 'hard'),
+    R('genre', 'gte', 35, 'hard'),
+    R('country', 'is', 'XX', 'hard'),
+    R('status', 'is', 'Ongoing', 'hard'),
+    R('year', 'gte', 1800, 'hard'),
+    R('year', 'lte', 3000, 'hard'),
+    R('seasons', 'gte', 0, 'hard'),
+    R('episodeMinutes', 'lte', 999, 'hard'),
+    R('nope', 'is', 1, 'hard'),
+    R('genre', 'isNot', 10764.5, 'hard'),
+    'garbage',
+    null,
+  ]),
+  [],
+);
+// Country codes normalize to uppercase; mode defaults to soft
+// (fail-safe: a malformed rule never becomes a hard filter).
+assert.deepEqual(util.validateRules([R('country', 'is', 'us', 'hard')]), [R('country', 'is', 'US', 'hard')]);
+assert.deepEqual(util.validateRules([{ dimension: 'genre', operator: 'is', value: 35 }]), [
+  R('genre', 'is', 35, 'soft'),
+]);
+assert.deepEqual(util.validateRules([R('genre', 'is', 35, 'banana')]), [R('genre', 'is', 35, 'soft')]);
+// Duplicates collapse; the list caps at MAX_PREFERENCE_RULES.
+assert.deepEqual(
+  util.validateRules([R('genre', 'isNot', 10764, 'hard'), R('genre', 'isNot', 10764, 'hard')]),
+  [R('genre', 'isNot', 10764, 'hard')],
+);
+const manyRules = Array.from({ length: 25 }, (_, i) => R('year', 'gte', 1900 + i, 'soft'));
+assert.equal(util.validateRules(manyRules).length, util.MAX_PREFERENCE_RULES);
+assert.deepEqual(util.validateRules(null), []);
+assert.deepEqual(util.validateRules('nope'), []);
+assert.deepEqual(util.validateRules({}), []);
+
+// --- legacy hardExcludes migration ---
+assert.deepEqual(
+  util.rulesFromLegacyExcludes({ genres: [10764, 35], minYear: 2000, maxYear: null }),
+  [R('genre', 'isNot', 10764, 'hard'), R('genre', 'isNot', 35, 'hard'), R('year', 'gte', 2000, 'hard')],
+);
+assert.deepEqual(
+  util.rulesFromLegacyExcludes({ genres: [10764, 99999], minYear: 2010, maxYear: 2000 }),
+  [R('genre', 'isNot', 10764, 'hard')], // inverted range drops both years, keeps genres
+);
+assert.deepEqual(util.rulesFromLegacyExcludes(null), []);
+
+// --- taste record round-trips (sections + rules) ---
+const ruleRecord = {
   sections: { shared: 's', casual: '', deep: '' },
-  hardExcludes: { genres: [10764], minYear: null, maxYear: null },
+  rules: [R('genre', 'isNot', 10764, 'hard')],
 };
-const exclStored = util.serializeTasteRecord(exclRecord);
-assert.ok(exclStored.startsWith('{')); // Shared-only + exclusions => JSON, never plain text
-assert.deepEqual(util.parseTasteRecord(exclStored), exclRecord);
+const ruleStored = util.serializeTasteRecord(ruleRecord);
+assert.ok(ruleStored.startsWith('{')); // Shared-only + rules => JSON, never plain text
+assert.ok(!ruleStored.includes('hardExcludes')); // the legacy key is never written
+assert.deepEqual(util.parseTasteRecord(ruleStored), ruleRecord);
 assert.deepEqual(util.parseTasteRecord('Plain old summary.'), {
   sections: { shared: 'Plain old summary.', casual: '', deep: '' },
-  hardExcludes: { genres: [], minYear: null, maxYear: null },
+  rules: [],
 });
 assert.deepEqual(util.parseTasteRecord('{"v":1,"shared":"s","casual":"","deep":""}'), {
   sections: { shared: 's', casual: '', deep: '' },
-  hardExcludes: { genres: [], minYear: null, maxYear: null },
+  rules: [],
 });
 assert.deepEqual(
   util.parseTasteRecord('{"v":1,"shared":"s","casual":"","deep":"","hardExcludes":{"genres":[99999],"minYear":2000}}'),
   {
     sections: { shared: 's', casual: '', deep: '' },
-    hardExcludes: { genres: [], minYear: 2000, maxYear: null }, // stored invalid ids dropped on read
+    rules: [R('year', 'gte', 2000, 'hard')], // legacy key converted; invalid ids dropped on read
+  },
+);
+assert.deepEqual(
+  util.parseTasteRecord(
+    '{"v":1,"shared":"s","casual":"","deep":"","rules":[{"dimension":"genre","operator":"is","value":35,"mode":"soft"}],"hardExcludes":{"genres":[10764],"minYear":null,"maxYear":null}}',
+  ),
+  {
+    sections: { shared: 's', casual: '', deep: '' },
+    rules: [R('genre', 'is', 35, 'soft'), R('genre', 'isNot', 10764, 'hard')], // merged + deduped
   },
 );
 assert.equal(
-  util.serializeTasteRecord({
-    sections: { shared: 'only', casual: '', deep: '' },
-    hardExcludes: { genres: [], minYear: null, maxYear: null },
-  }),
+  util.serializeTasteRecord({ sections: { shared: 'only', casual: '', deep: '' }, rules: [] }),
   'only',
 );
 
-// --- passesHardExcludes ---
-const yearEx = { genres: [10764], minYear: 2000, maxYear: 2010 };
-assert.equal(util.passesHardExcludes({ genreIds: [35, 10764], firstAirDate: '2005-01-01' }, yearEx), false); // any-match genre
-assert.equal(util.passesHardExcludes({ genreIds: [35], firstAirDate: '2005-01-01' }, yearEx), true);
-assert.equal(util.passesHardExcludes({ genreIds: [35], firstAirDate: '1999-01-01' }, yearEx), false);
-assert.equal(util.passesHardExcludes({ genreIds: [35], firstAirDate: '2011-01-01' }, yearEx), false);
-assert.equal(util.passesHardExcludes({ genreIds: [35], firstAirDate: '' }, yearEx), true); // unknown year fails open
+// --- ruleMatches / passesHardRules / softRuleScore ---
+const facts = {
+  genreIds: [35, 10764],
+  year: 2005,
+  originCountry: ['US'],
+  status: 'Ended',
+  seasons: 4,
+  episodeMinutes: 30,
+};
+const unknown = {
+  genreIds: [35],
+  year: null,
+  originCountry: [],
+  status: null,
+  seasons: null,
+  episodeMinutes: null,
+};
+assert.equal(util.ruleMatches(facts, R('genre', 'isNot', 10764, 'hard')), false); // any-genre match
+assert.equal(util.ruleMatches(facts, R('genre', 'is', 35, 'hard')), true);
+assert.equal(util.ruleMatches(facts, R('year', 'gte', 2000, 'hard')), true);
+assert.equal(util.ruleMatches(facts, R('year', 'lte', 2000, 'hard')), false);
+assert.equal(util.ruleMatches(unknown, R('year', 'gte', 2000, 'hard')), null); // unknown -> null
+assert.equal(util.ruleMatches(unknown, R('country', 'is', 'US', 'hard')), null);
+assert.equal(util.ruleMatches(unknown, R('status', 'is', 'Ended', 'hard')), null);
+assert.equal(util.ruleMatches(facts, R('seasons', 'lte', 3, 'hard')), false);
+assert.equal(util.ruleMatches(facts, R('episodeMinutes', 'lte', 30, 'hard')), true);
+
+const hardRules = [
+  R('genre', 'isNot', 10764, 'hard'),
+  R('year', 'gte', 2000, 'hard'),
+  R('year', 'lte', 2010, 'hard'),
+];
+assert.equal(util.passesHardRules(facts, hardRules), false); // reality genre fails it
+assert.equal(util.passesHardRules({ ...facts, genreIds: [35] }, hardRules), true);
+assert.equal(util.passesHardRules({ ...facts, genreIds: [35], year: 1999 }, hardRules), false);
+assert.equal(util.passesHardRules({ ...facts, genreIds: [35], year: 2011 }, hardRules), false);
+assert.equal(util.passesHardRules(unknown, hardRules), true); // unknown facts fail open
+assert.equal(util.passesHardRules(facts, []), true);
 assert.equal(
-  util.passesHardExcludes({ genreIds: [10764], firstAirDate: '1990-01-01' }, { genres: [], minYear: null, maxYear: null }),
-  true, // empty exclusions pass everything
+  util.passesHardRules(facts, [R('genre', 'isNot', 10764, 'soft')]),
+  true, // soft rules never filter
+);
+assert.equal(
+  util.passesHardRules(facts, [R('seasons', 'lte', 3, 'hard')]),
+  false, // detail dimension binds when facts are known
+);
+assert.equal(
+  util.passesHardRules(unknown, [R('seasons', 'lte', 3, 'hard')]),
+  true, // and passes open when unknown (ingestion stage)
 );
 
-// --- parseConsolidationResponse with hardExcludes ---
-const conEx = util.parseConsolidationResponse(
-  '{"summary": {"shared": "s", "casual": "", "deep": ""}, "contradictions": [], "languageConflict": null, "hardExcludes": {"genres": [10764, 424242], "minYear": 2000, "maxYear": null}}',
+// softRuleScore: mean over evaluable soft rules; +1 match,
+// -distance miss (categorical = 1, numeric scaled + capped).
+assert.equal(util.softRuleScore(facts, []), 0);
+assert.equal(util.softRuleScore(facts, [R('genre', 'isNot', 10764, 'hard')]), 0); // hard rules don't score
+assert.equal(util.softRuleScore(facts, [R('genre', 'is', 35, 'soft')]), 1);
+assert.equal(util.softRuleScore(facts, [R('genre', 'isNot', 10764, 'soft')]), -1);
+assert.equal(util.softRuleScore({ ...facts, year: 1990 }, [R('year', 'gte', 2000, 'soft')]), -0.4); // 10/25
+assert.equal(util.softRuleScore({ ...facts, year: 1950 }, [R('year', 'gte', 2000, 'soft')]), -1); // capped
+assert.equal(util.softRuleScore({ ...facts, seasons: 6 }, [R('seasons', 'lte', 3, 'soft')]), -0.6); // 3/5
+assert.equal(
+  util.softRuleScore(facts, [R('genre', 'is', 35, 'soft'), R('genre', 'isNot', 10764, 'soft')]),
+  0, // mean of +1 and -1
 );
-assert.deepEqual(conEx.hardExcludes, { genres: [10764], minYear: 2000, maxYear: null });
-const conNoEx = util.parseConsolidationResponse(
+assert.equal(
+  util.softRuleScore(unknown, [R('genre', 'is', 35, 'soft'), R('seasons', 'gte', 10, 'soft')]),
+  1, // unevaluable rule skipped, not diluting the mean
+);
+assert.equal(util.softRuleScore(unknown, [R('seasons', 'gte', 10, 'soft')]), 0);
+
+// --- parseConsolidationResponse with rules ---
+const conRules = util.parseConsolidationResponse(
+  '{"summary": {"shared": "s", "casual": "", "deep": ""}, "contradictions": [], "languageConflict": null, "rules": [{"dimension": "genre", "operator": "isNot", "value": 10764, "mode": "hard"}, {"dimension": "genre", "operator": "isNot", "value": 424242, "mode": "hard"}]}',
+);
+assert.deepEqual(conRules.rules, [R('genre', 'isNot', 10764, 'hard')]); // invalid id dropped
+const conNoRules = util.parseConsolidationResponse(
   '{"summary": {"shared": "s", "casual": "", "deep": ""}, "contradictions": []}',
 );
-assert.deepEqual(conNoEx.hardExcludes, { genres: [], minYear: null, maxYear: null });
-assert.deepEqual(util.parseConsolidationResponse('Just text.').hardExcludes, { genres: [], minYear: null, maxYear: null });
+assert.deepEqual(conNoRules.rules, []);
+assert.deepEqual(util.parseConsolidationResponse('Just text.').rules, []);
+
 assert.equal(
   util.tasteTextForKind({ shared: 's', casual: 'c', deep: 'd' }, 'casual'),
   's\nc',
@@ -445,6 +564,25 @@ const calibItems = [
 const calibTarget = new Map([['comedy', 1]]);
 const calib = rerank.deterministicRerank(calibItems, 'casual', calibTarget, 3);
 assert.equal(calib.ordered[0].tmdbId, 2);
+// Soft rules: with equal fit/novelty/freshness and no calibration
+// target, the item satisfying the soft rules (+1) wins over the
+// item violating them (-1) by the bounded bonus; without the rules
+// field the same input keeps input order (byte-identical behavior
+// for rule-less profiles).
+const ruleItems = [
+  { tmdbId: 1, fit: 1.0, novelty: 0.5, freshness: 0.5, rules: -1, cluster: 'drama', embedding: [1, 0], genreIds: [18] },
+  { tmdbId: 2, fit: 1.0, novelty: 0.5, freshness: 0.5, rules: 1, cluster: 'comedy', embedding: [0, 1], genreIds: [35] },
+];
+const ruled = rerank.deterministicRerank(ruleItems, 'casual', new Map(), 3);
+assert.deepEqual(ruled.ordered.map((x) => x.tmdbId), [2, 1]);
+const unruled = rerank.deterministicRerank(
+  ruleItems.map(({ rules: _r, ...rest }) => rest),
+  'casual',
+  new Map(),
+  3,
+);
+assert.deepEqual(unruled.ordered.map((x) => x.tmdbId), [1, 2]);
+assert.equal(rerank.RULES_BONUS_WEIGHT, 0.1);
 // Determinism: same input twice -> same order
 const again = rerank.deterministicRerank(mmrItems, 'deep', new Map(), 3);
 assert.deepEqual(again.ordered.map((x) => x.tmdbId), mmr.ordered.map((x) => x.tmdbId));
@@ -598,7 +736,7 @@ assert.ok(consolParsed.sections.casual.includes('light')); // casual cue routes
 assert.ok(consolParsed.sections.deep.includes('immersive')); // deep cue routes
 assert.deepEqual(consolParsed.contradictions, []);
 assert.equal(consolParsed.languageConflict, null);
-assert.deepEqual(consolParsed.hardExcludes, { genres: [], minYear: null, maxYear: null }); // 'No horror' is unmappable: no exclusion
+assert.deepEqual(consolParsed.rules, []); // 'No horror' is unmappable: no rule
 
 // --- mock Hebrew cue routing (dev-only simulation fidelity) ---
 // Eyal's exact dev-profile sentences route to the right sections when
@@ -629,45 +767,56 @@ assert.ok(hebrewParsed.sections.casual.includes('קומיות'));
 assert.ok(hebrewParsed.sections.deep.includes('אקשן'));
 assert.ok(hebrewParsed.sections.shared.includes('ישראליות'));
 
-// --- mock hard-exclusion extraction (dev-only simulation fidelity) ---
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['I never watch reality shows']),
-  { genres: [10764], minYear: null, maxYear: null },
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['לא אוהב ריאלטי, תוכניות אירוח, ותוכניות מוזיקליות']),
-  { genres: [10764, 10767], minYear: null, maxYear: null }, // musicals unmappable: dropped
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['I prefer less comedy']),
-  { genres: [], minYear: null, maxYear: null }, // mild wording: no exclusion
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['No horror, please.']),
-  { genres: [], minYear: null, maxYear: null }, // horror has no TV genre
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['Nothing before 2000']),
-  { genres: [], minYear: 2000, maxYear: null }, // exclude older shows
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['Shows from 2010 onwards only']),
-  { genres: [], minYear: 2010, maxYear: null },
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['Only shows before 2000']),
-  { genres: [], minYear: null, maxYear: 1999 }, // exclude newer shows
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['Nothing after 2010']),
-  { genres: [], minYear: null, maxYear: 2010 },
-);
-assert.deepEqual(
-  mockLlm.extractMockHardExcludes(['Shows before 2000']),
-  { genres: [], minYear: null, maxYear: null }, // bare "before" is ambiguous: omitted
-);
+// --- mock rule extraction (dev-only simulation fidelity) ---
+const MR = (dimension, operator, value, mode) => ({ dimension, operator, value, mode });
+assert.deepEqual(mockLlm.extractMockRules(['I never watch reality shows']), [
+  MR('genre', 'isNot', 10764, 'hard'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['לא אוהב ריאלטי, תוכניות אירוח, ותוכניות מוזיקליות']), [
+  MR('genre', 'isNot', 10764, 'hard'),
+  MR('genre', 'isNot', 10767, 'hard'), // musicals unmappable: dropped
+]);
+assert.deepEqual(mockLlm.extractMockRules(['I prefer less comedy']), [
+  MR('genre', 'isNot', 35, 'soft'), // mild wording: soft rule, never hard
+]);
+assert.deepEqual(mockLlm.extractMockRules(['No horror, please.']), []); // horror has no TV genre
+assert.deepEqual(mockLlm.extractMockRules(['Nothing before 2000']), [MR('year', 'gte', 2000, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['Shows from 2010 onwards only']), [MR('year', 'gte', 2010, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['Only shows before 2000']), [MR('year', 'lte', 1999, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['Nothing after 2010']), [MR('year', 'lte', 2010, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['Shows before 2000']), []); // bare "before" is ambiguous: omitted
+assert.deepEqual(mockLlm.extractMockRules(['I prefer shows after 2010']), [MR('year', 'gte', 2011, 'soft')]);
+assert.deepEqual(mockLlm.extractMockRules(['I love comedies']), [MR('genre', 'is', 35, 'soft')]);
+assert.deepEqual(mockLlm.extractMockRules(['I only watch comedies']), [MR('genre', 'is', 35, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['I must avoid comedies']), [MR('genre', 'isNot', 35, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['No comedies, only drama']), [
+  MR('genre', 'isNot', 35, 'hard'),
+  MR('genre', 'is', 18, 'hard'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['No American shows']), [MR('country', 'isNot', 'US', 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['I love Korean dramas']), [
+  MR('genre', 'is', 18, 'soft'),
+  MR('country', 'is', 'KR', 'soft'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['Only finished shows']), [MR('status', 'is', 'Ended', 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['No ongoing shows']), [
+  MR('status', 'isNot', 'Returning Series', 'hard'),
+  MR('status', 'isNot', 'In Production', 'hard'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['I like shows with at least 3 seasons']), [
+  MR('seasons', 'gte', 3, 'soft'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['Never more than 2 seasons']), [MR('seasons', 'lte', 2, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['Episodes under 30 minutes, please']), [
+  MR('episodeMinutes', 'lte', 30, 'soft'),
+]);
+// Eyal's real Hebrew note: a soft comedy rule + a soft seasons rule.
+assert.deepEqual(mockLlm.extractMockRules(['אוהב סדרות קומיות קצרות וקלילות, עם לפחות 3 עונות']), [
+  MR('genre', 'is', 35, 'soft'),
+  MR('seasons', 'gte', 3, 'soft'),
+]);
 // End-to-end through the real prompt builder + mock provider + parser:
-// the prompt carries the fixed list, the mock emits the exclusion, the
+// the prompt carries the fixed list, the mock emits the rule, the
 // parser validates it — and the 'THREE sections' mock-detection
 // marker survives the prompt change.
 const exclReq = llm.buildConsolidationPrompt(
@@ -678,8 +827,10 @@ const exclReq = llm.buildConsolidationPrompt(
 );
 assert.ok(exclReq.system.includes('THREE sections'));
 assert.ok(exclReq.system.includes('10764=Reality'));
+assert.ok(exclReq.system.includes('RULES'));
+assert.ok(exclReq.system.includes('Returning Series'));
 const exclParsed = util.parseConsolidationResponse(await mockProvider.generate(exclReq));
-assert.deepEqual(exclParsed.hardExcludes, { genres: [10764], minYear: null, maxYear: null });
+assert.deepEqual(exclParsed.rules, [MR('genre', 'isNot', 10764, 'hard')]);
 
 const rankCands = [
   { tmdbId: 11, title: 'Alpha Show', year: '2020', genres: ['Comedy'], originalLanguage: 'en', originCountry: ['US'], anchorTitle: 'Seinfeld' },

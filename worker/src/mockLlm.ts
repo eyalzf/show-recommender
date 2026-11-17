@@ -1,5 +1,5 @@
 import type { LlmProvider, LlmRequest } from './llm';
-import { TMDB_TV_GENRES, validateHardExcludes, type HardExcludes } from './util';
+import { TMDB_TV_GENRES, validateRules, type PreferenceRule } from './util';
 
 /**
  * Deterministic mock LLM provider + mock embeddings — the quota-free
@@ -115,25 +115,46 @@ export function routeNote(text: string): 'shared' | 'casual' | 'deep' {
   return 'shared';
 }
 
-// Mock hard-exclusion extraction — SIMULATION ONLY, same caveat as
-// routeNote: the production model extracts by meaning; the mock can
-// only match a categorical marker + a genre cue word in the same NOTE
-// line (ratings never count — a rating of one show is not a category
-// rejection). Genre ids resolve through the FIXED list, so the mock
-// can never emit an id the server would reject — and the server
-// validates anyway. Deliberately narrow: mild wording ("prefer less")
-// and unmappable categories ("horror", "musical") produce no
-// exclusion, exactly like production's rules.
+// Mock rule extraction — SIMULATION ONLY, same caveat as routeNote:
+// the production model extracts by meaning; the mock can only match
+// a modal marker + a cue word in the same NOTE line (ratings never
+// count — a rating of one show is not a category statement). Values
+// resolve through the FIXED lists, so the mock can never emit a
+// value the server would reject — and the server validates anyway.
+// Deliberately narrow: vague wording and unmappable categories
+// ("horror", "musical") produce no rule, exactly like production.
 const EXCLUSION_MARKERS = [
   'never', "don't like", 'dont like', 'hate', "can't stand", 'cant stand',
-  'avoid', 'no ', 'not a fan', 'dislike',
-  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה',
+  'avoid', 'no ', 'not a fan', 'dislike', 'must', 'only',
+  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק',
+];
+
+const LIKE_MARKERS = [
+  'love', 'like', 'enjoy', 'prefer', 'more of', 'great',
+  'אוהב', 'אוהבת', 'מעדיף', 'מעדיפה', 'נהדר',
+];
+
+const NEGATED_PREFER_MARKERS = [
+  'prefer less', 'prefer no', 'not usually',
+  'מעדיף פחות', 'מעדיפה פחות',
+];
+
+const COUNTRY_CUE_WORDS: Array<{ code: string; words: string[] }> = [
+  { code: 'US', words: ['american', 'אמריקאי', 'אמריקאית'] },
+  { code: 'GB', words: ['british', 'uk ', 'בריטי'] },
+  { code: 'KR', words: ['korean', 'קוריאני'] },
+  { code: 'IL', words: ['israeli', 'ישראלי'] },
+  { code: 'ES', words: ['spanish', 'ספרדי'] },
+  { code: 'FR', words: ['french', 'צרפתי'] },
+  { code: 'DE', words: ['german', 'גרמני'] },
+  { code: 'JP', words: ['japanese', 'יפני'] },
+  { code: 'TR', words: ['turkish', 'טורקי'] },
 ];
 
 const GENRE_CUE_WORDS: Array<{ name: string; words: string[] }> = [
   { name: 'Action & Adventure', words: ['action', 'adventure', 'אקשן', 'הרפתקאות'] },
   { name: 'Animation', words: ['animation', 'animated', 'אנימציה', 'מצויר'] },
-  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומדיה', 'סיטקום'] },
+  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומדיה', 'קומי', 'סיטקום'] },
   { name: 'Crime', words: ['crime', 'פשע'] },
   { name: 'Documentary', words: ['documentary', 'documentaries', 'דוקו'] },
   { name: 'Drama', words: ['drama', 'דרמה'] },
@@ -149,51 +170,133 @@ const GENRE_CUE_WORDS: Array<{ name: string; words: string[] }> = [
   { name: 'Western', words: ['western', 'מערבון'] },
 ];
 
-/** Extract hard exclusions from note statements. Exported for selftest. */
-export function extractMockHardExcludes(notes: string[]): HardExcludes {
+/** Extract preference rules from note statements. Exported for selftest. */
+export function extractMockRules(notes: string[]): PreferenceRule[] {
   const genreIdByName = new Map(TMDB_TV_GENRES.map((g) => [g.name, g.id]));
-  const genres = new Set<number>();
-  let minYear: number | null = null;
-  let maxYear: number | null = null;
+  const draft: Array<{ dimension: string; operator: string; value: number | string; mode: string }> = [];
+  const push = (
+    dimension: string,
+    operator: string,
+    value: number | string,
+    mode: 'hard' | 'soft',
+  ) => draft.push({ dimension, operator, value, mode });
   for (const statement of notes) {
     const lower = statement.toLowerCase();
-    if (EXCLUSION_MARKERS.some((m) => lower.includes(m.toLowerCase()))) {
+    const has = (markers: string[]) => markers.some((m) => lower.includes(m.toLowerCase()));
+    const categorical = has(EXCLUSION_MARKERS);
+    const negatedPrefer = has(NEGATED_PREFER_MARKERS);
+    const liking = has(LIKE_MARKERS);
+    // Genre + country: categorical -> hard isNot; negated prefer ->
+    // soft isNot; liking -> soft is. Categorical wins over liking
+    // ("don't like" contains "like"; "לא אוהב" contains "אוהב").
+    // EXCEPTION: an inclusion modal ("only", "must", "רק", "חייב")
+    // right before the cue word means is/HARD ("only comedies"),
+    // unless a negation sits between the modal and the cue
+    // ("must avoid comedies" stays an exclusion).
+    const inclusionBefore = (idx: number) => {
+      // The LAST inclusion modal before the cue decides: the segment
+      // between it and the cue must be short and negation-free
+      // ("only comedies" includes; "must avoid comedies" and
+      // "only comedies, never drama" for the drama cue exclude).
+      const before = lower.slice(0, idx);
+      let lastEnd = -1;
+      for (const m of before.matchAll(/\bonly\b|\bmust\b|has to|have to|חייב|רק/g)) {
+        lastEnd = (m.index ?? 0) + m[0].length;
+      }
+      if (lastEnd === -1) return false;
+      const segment = before.slice(lastEnd);
+      return segment.length <= 20 && !/\bnever\b|\bno\b|\bnot\b|avoid|dislike|hate|לא|בלי/.test(segment);
+    };
+    const genreMode: 'hard' | 'soft' | null = categorical
+      ? 'hard'
+      : negatedPrefer || liking
+        ? 'soft'
+        : null;
+    if (genreMode || lower.includes('only') || lower.includes('רק') || lower.includes('must') || lower.includes('חייב')) {
+      const operator = categorical || negatedPrefer ? 'isNot' : 'is';
       for (const cue of GENRE_CUE_WORDS) {
-        if (cue.words.some((w) => lower.includes(w.toLowerCase()))) {
-          const id = genreIdByName.get(cue.name);
-          if (id !== undefined) genres.add(id);
+        const id = genreIdByName.get(cue.name);
+        if (id === undefined) continue;
+        for (const w of cue.words) {
+          const idx = lower.indexOf(w.toLowerCase());
+          if (idx === -1) continue;
+          if (inclusionBefore(idx)) push('genre', 'is', id, 'hard');
+          else if (genreMode) push('genre', operator, id, genreMode);
+          break;
+        }
+      }
+      for (const cue of COUNTRY_CUE_WORDS) {
+        for (const w of cue.words) {
+          const idx = lower.indexOf(w.toLowerCase());
+          if (idx === -1) continue;
+          if (inclusionBefore(idx)) push('country', 'is', cue.code, 'hard');
+          else if (genreMode) push('country', operator, cue.code, genreMode);
+          break;
         }
       }
     }
+    // Status: "only finished/ended" -> is Ended; "no ongoing" ->
+    // isNot Returning Series + isNot In Production. Mode follows
+    // the same categorical/liking rule.
+    if (/only\b[^.]*\b(finished|ended|completed)\b|רק[^.]*?(שהסתיימו|גמורות)/i.test(statement)) {
+      push('status', 'is', 'Ended', categorical ? 'hard' : 'soft');
+    }
+    if (/\bno\b[^.]*\b(ongoing|still running)\b|בלי[^.]*?(ממשיכות|עדיין)/i.test(statement)) {
+      push('status', 'isNot', 'Returning Series', 'hard');
+      push('status', 'isNot', 'In Production', 'hard');
+    }
+    // Seasons: "at least N seasons" -> gte N; "no more than N" /
+    // "up to N seasons" -> lte N. Hebrew mirrors with עונות.
+    const seasonsGte =
+      /at least\s+(\d+)\s+seasons?|לפחות\s+(\d+)\s+עונות/i.exec(statement);
+    if (seasonsGte) push('seasons', 'gte', Number(seasonsGte[1] ?? seasonsGte[2]), categorical ? 'hard' : 'soft');
+    const seasonsLte =
+      /(?:no more than|never more than|at most|up to)\s+(\d+)\s+seasons?|(?:לא יותר מ-?|עד)\s+(\d+)\s+עונות/i.exec(statement);
+    if (seasonsLte) push('seasons', 'lte', Number(seasonsLte[1] ?? seasonsLte[2]), categorical ? 'hard' : 'soft');
+    // Episode minutes: "episodes under N minutes" -> lte N;
+    // "episodes over/at least N minutes" -> gte N. Hebrew mirrors.
+    const minutesLte =
+      /episodes?\s+(?:under|less than|at most|up to)\s+(\d+)\s+minutes?|פרקים?\s+(?:עד|פחות מ-?)\s+(\d+)\s+דקות/i.exec(statement);
+    if (minutesLte) push('episodeMinutes', 'lte', Number(minutesLte[1] ?? minutesLte[2]), categorical ? 'hard' : 'soft');
+    const minutesGte =
+      /episodes?\s+(?:over|more than|at least)\s+(\d+)\s+minutes?|פרקים?\s+(?:מעל|לפחות)\s+(\d+)\s+דקות/i.exec(statement);
+    if (minutesGte) push('episodeMinutes', 'gte', Number(minutesGte[1] ?? minutesGte[2]), categorical ? 'hard' : 'soft');
     // Year boundaries. "Before" is ambiguous on its own ("nothing
     // before 2000" wants 2000+, "only before 2000" wants pre-2000),
     // so bare "before YYYY" is SKIPPED (when in doubt, omit — the
     // production rule). Only unambiguous phrasings map:
-    // nothing/no/none before YYYY -> minYear YYYY (exclude older);
-    // nothing/no/none after YYYY -> maxYear YYYY (exclude newer);
-    // only ... before YYYY -> maxYear YYYY-1 (exclude newer);
-    // after/since/from YYYY -> minYear YYYY (after: YYYY+1);
-    // until/up to/through YYYY -> maxYear YYYY. Hebrew mirrors:
-    // שום דבר/כלום לפני -> minYear; שום דבר/כלום אחרי -> maxYear;
-    // רק לפני -> maxYear-1; מ-/משנת/החל מ- -> minYear; עד -> maxYear.
+    // nothing/no/none before YYYY -> gte YYYY (exclude older);
+    // nothing/no/none after YYYY -> lte YYYY (exclude newer);
+    // only ... before YYYY -> lte YYYY-1 (exclude newer);
+    // after/since/from YYYY -> gte YYYY (after: YYYY+1);
+    // until/up to/through YYYY -> lte YYYY. Hebrew mirrors:
+    // שום דבר/כלום לפני -> gte; שום דבר/כלום אחרי -> lte;
+    // רק לפני -> lte YYYY-1; מ-/משנת/החל מ- -> gte; עד -> lte.
+    // Mode: categorical/only -> hard; liking/prefer -> soft; bare
+    // boundary phrasing reads as a constraint -> hard.
+    const yearMode: 'hard' | 'soft' = categorical || lower.includes('only') || lower.includes('רק')
+      ? 'hard'
+      : liking
+        ? 'soft'
+        : 'hard';
     const nothingBefore = /(?:nothing|none|no)\b[^.]*?\bbefore\s+(\d{4})|(?:שום דבר|כלום)\s+לפני\s+(\d{4})/i.exec(statement);
-    if (nothingBefore) minYear = Number(nothingBefore[1] ?? nothingBefore[2]);
+    if (nothingBefore) push('year', 'gte', Number(nothingBefore[1] ?? nothingBefore[2]), yearMode);
     const nothingAfter = /(?:nothing|none|no)\b[^.]*?\bafter\s+(\d{4})|(?:שום דבר|כלום)\s+אחרי\s+(\d{4})/i.exec(statement);
-    if (nothingAfter) maxYear = Number(nothingAfter[1] ?? nothingAfter[2]);
+    if (nothingAfter) push('year', 'lte', Number(nothingAfter[1] ?? nothingAfter[2]), yearMode);
     const onlyBefore = /only\b[^.]*before\s+(\d{4})|רק\s+לפני\s+(\d{4})/i.exec(statement);
-    if (onlyBefore) maxYear = Number(onlyBefore[1] ?? onlyBefore[2]) - 1;
+    if (onlyBefore) push('year', 'lte', Number(onlyBefore[1] ?? onlyBefore[2]) - 1, 'hard');
     if (!nothingAfter) {
       const after = /after\s+(\d{4})/i.exec(statement);
-      if (after) minYear = Number(after[1]) + 1;
+      if (after) push('year', 'gte', Number(after[1]) + 1, yearMode);
     }
     const sinceFrom = /(?:since|from)\s+(\d{4})/i.exec(statement);
-    if (sinceFrom) minYear = Number(sinceFrom[1]);
+    if (sinceFrom) push('year', 'gte', Number(sinceFrom[1]), yearMode);
     const heAfter = /(?:מ-|החל מ-?|משנת)\s*(\d{4})/.exec(statement);
-    if (heAfter) minYear = Number(heAfter[1]);
+    if (heAfter) push('year', 'gte', Number(heAfter[1]), yearMode);
     const until = /(?:until|up to|through)\s+(\d{4})|עד\s+(\d{4})/i.exec(statement);
-    if (until) maxYear = Number(until[1] ?? until[2]);
+    if (until) push('year', 'lte', Number(until[1] ?? until[2]), yearMode);
   }
-  return validateHardExcludes({ genres: [...genres], minYear, maxYear });
+  return validateRules(draft);
 }
 
 /**
@@ -234,7 +337,7 @@ function mockConsolidation(userText: string): string {
     },
     contradictions: [],
     languageConflict: null,
-    hardExcludes: extractMockHardExcludes(noteStatements),
+    rules: extractMockRules(noteStatements),
   });
 }
 

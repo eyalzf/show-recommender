@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api';
+import { api, type PreferenceRule } from '../api';
 import type { Profile, TasteContradiction, TasteSectionKey, TasteSections, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
@@ -43,12 +43,8 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   const [draft, setDraft] = useState('');
   const [stub, setStub] = useState(false);
   const [contradiction, setContradiction] = useState<TasteContradiction | null>(null);
-  const [hardExcludes, setHardExcludes] = useState<{
-    genres: number[];
-    genreLabels: string[];
-    minYear: number | null;
-    maxYear: number | null;
-  } | null>(null);
+  const [rules, setRules] = useState<PreferenceRule[]>([]);
+  const [genreLabels, setGenreLabels] = useState<Record<string, string>>({});
   const [languageConflict, setLanguageConflict] = useState<{
     praisedLanguage: string;
     languageCode?: string;
@@ -79,7 +75,8 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         setSections(sectionsFromResponse(res));
         setStub(Boolean(res.stub));
         setContradiction(res.contradiction);
-        setHardExcludes(res.hardExcludes ?? null);
+        setRules(res.rules ?? []);
+        setGenreLabels(res.genreLabels ?? {});
         setLanguageConflict(res.languageConflict);
         if (res.profile) setLanguages(res.profile.languages);
       })
@@ -202,7 +199,8 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
           if (JSON.stringify(latest) !== before || Date.now() >= deadline) {
             setSections(latest);
             setContradiction(res.contradiction);
-            setHardExcludes(res.hardExcludes ?? null);
+            setRules(res.rules ?? []);
+            setGenreLabels(res.genreLabels ?? {});
             setLanguageConflict(res.languageConflict);
             break;
           }
@@ -224,19 +222,37 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   // empty presentation.
   const calculating = loadingTaste || updating;
 
-  // Derived hard exclusions, shown read-only: they come from the notes
-  // (a categorical rejection), and a new note is what changes them.
-  const yearText = (() => {
-    if (!hardExcludes) return '';
-    const { minYear, maxYear } = hardExcludes;
-    if (minYear !== null && maxYear !== null) return `${minYear}–${maxYear}`;
-    if (minYear !== null) return `${t(lang, 'tasteFromYear')} ${minYear}`;
-    if (maxYear !== null) return `${t(lang, 'tasteUntilYear')} ${maxYear}`;
-    return '';
-  })();
-  const excludeParts = hardExcludes
-    ? [...hardExcludes.genreLabels, yearText].filter(Boolean)
-    : [];
+  // Derived preference rules, shown read-only: they come from the
+  // notes, and a new note is what changes them. Hard rules filter
+  // the lists; soft rules nudge the ranking.
+  const formatRule = (rule: PreferenceRule): string => {
+    const cmp = rule.operator === 'gte' ? '≥' : '≤';
+    const body = (() => {
+      switch (rule.dimension) {
+        case 'genre':
+          return genreLabels[String(rule.value)] ?? String(rule.value);
+        case 'year':
+          return `${t(lang, 'ruleYear')} ${cmp} ${rule.value}`;
+        case 'country':
+          return `${t(lang, 'ruleCountry')} ${rule.value}`;
+        case 'status':
+          return `${t(lang, 'ruleStatus')} ${rule.value}`;
+        case 'seasons':
+          return `${t(lang, 'ruleSeasons')} ${cmp} ${rule.value}`;
+        case 'episodeMinutes':
+          return `${t(lang, 'ruleEpisodeMinutes')} ${cmp} ${rule.value} ${t(lang, 'ruleMinutes')}`;
+      }
+    })();
+    const prefix =
+      rule.mode === 'hard'
+        ? rule.operator === 'isNot'
+          ? t(lang, 'ruleNever')
+          : t(lang, 'ruleOnly')
+        : rule.operator === 'isNot'
+          ? t(lang, 'rulePreferNo')
+          : t(lang, 'rulePrefer');
+    return `${prefix}: ${body}`;
+  };
 
   return (
     <section>
@@ -298,11 +314,15 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         </div>
       ))}
 
-      {excludeParts.length > 0 ? (
+      {rules.length > 0 ? (
         <div className="taste-section">
-          <h3>{t(lang, 'tasteNeverShowing')}</h3>
-          <p className="summary-text">{excludeParts.join(' · ')}</p>
-          <p className="taste-hint">{t(lang, 'tasteNeverShowingHint')}</p>
+          <h3>{t(lang, 'tasteRules')}</h3>
+          {rules.map((rule, i) => (
+            <p key={`${rule.dimension}-${rule.operator}-${rule.value}-${rule.mode}-${i}`} className="summary-text">
+              {formatRule(rule)}
+            </p>
+          ))}
+          <p className="taste-hint">{t(lang, 'tasteRulesHint')}</p>
         </div>
       ) : null}
 

@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { normalizeTitle, parseTasteRecord, parseTasteSummary, serializeTasteRecord, serializeTasteSummary, type HardExcludes, type TasteRecord, type TasteSections } from './util';
+import { normalizeTitle, parseTasteRecord, parseTasteSummary, serializeTasteRecord, serializeTasteSummary, type PreferenceRule, type TasteRecord, type TasteSections } from './util';
 
 /**
  * D1 access for profile-scoped state. Every function here takes an
@@ -71,8 +71,8 @@ export interface ProfileContext {
   tasteSummary: string | null;
   /** Stored summary parsed into Shared/Casual/Deep sections (see util.ts storage note). Legacy plain text reads as Shared-only. */
   tasteSections: TasteSections;
-  /** Derived hard exclusions stored with the summary (validated; empty for legacy rows). */
-  hardExcludes: HardExcludes;
+  /** Derived preference rules stored with the summary (validated; empty for legacy rows). */
+  rules: PreferenceRule[];
   externalRecs: ExternalRecRow[];
 }
 
@@ -259,7 +259,7 @@ export async function loadProfileContext(
     overrides,
     tasteSummary: summaryText,
     tasteSections: tasteRecord.sections,
-    hardExcludes: tasteRecord.hardExcludes,
+    rules: tasteRecord.rules,
     externalRecs,
   };
 }

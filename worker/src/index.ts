@@ -55,7 +55,7 @@ import {
   parseTasteSummary,
   TMDB_TV_GENRES,
   type Contradiction,
-  type HardExcludes,
+  type PreferenceRule,
   type TasteSections,
 } from './util';
 import {
@@ -654,7 +654,7 @@ interface ConsolidationOutcome {
     languageName: string;
     message?: string;
   } | null;
-  hardExcludes: HardExcludes;
+  rules: PreferenceRule[];
   provider: string;
 }
 
@@ -691,7 +691,7 @@ async function consolidateFromLog(
       sections: { ...ctx.tasteSections },
       contradictions: [],
       languageConflict: null,
-      hardExcludes: ctx.hardExcludes,
+      rules: ctx.rules,
       provider: provider.name,
     };
   }
@@ -728,7 +728,7 @@ async function consolidateFromLog(
     if ((latest?.m ?? 0) <= snapshotMaxCreatedAt) {
       await saveTasteRecord(db, profileId, uiLang, {
         sections: parsed.sections,
-        hardExcludes: parsed.hardExcludes,
+        rules: parsed.rules,
       });
       await invalidateLists(db, profileId);
     }
@@ -738,7 +738,7 @@ async function consolidateFromLog(
     sections: parsed.sections,
     contradictions: parsed.contradictions.slice(0, 3),
     languageConflict,
-    hardExcludes: parsed.hardExcludes,
+    rules: parsed.rules,
     provider: provider.name,
   };
 }
@@ -790,25 +790,28 @@ app.get('/api/taste', async (c: Ctx) => {
     ...ctx.showFeedback.map((f) => f.text).filter(Boolean),
   ];
   const conflict = detectLanguageConflict(allTexts, ctx.profile.languages);
-  // Resolve excluded-genre display labels via the localized TMDB genre
+  // Resolve genre-rule display labels via the localized TMDB genre
   // map (the same source show cards use); fall back to the fixed
   // list's canonical English names when TMDB is unreachable, so a
-  // metadata failure never breaks the taste read.
-  let genreLabels: string[] = [];
-  if (ctx.hardExcludes.genres.length > 0) {
+  // metadata failure never breaks the taste read. Labels key by
+  // genre id; the frontend formats each rule's display text.
+  const genreRuleIds = [...new Set(ctx.rules.filter((r) => r.dimension === 'genre').map((r) => r.value as number))];
+  const genreLabels: Record<string, string> = {};
+  if (genreRuleIds.length > 0) {
     const canonical = new Map(TMDB_TV_GENRES.map((g) => [g.id, g.name]));
     try {
       const map = await getGenreMap(c, lang);
-      genreLabels = ctx.hardExcludes.genres.map((id) => map.get(id) ?? canonical.get(id) ?? String(id));
+      for (const id of genreRuleIds) genreLabels[id] = map.get(id) ?? canonical.get(id) ?? String(id);
     } catch {
-      genreLabels = ctx.hardExcludes.genres.map((id) => canonical.get(id) ?? String(id));
+      for (const id of genreRuleIds) genreLabels[id] = canonical.get(id) ?? String(id);
     }
   }
   return c.json({
     summary: combineTasteSections(ctx.tasteSections),
     sections: ctx.tasteSections,
     summaryLanguage: lang,
-    hardExcludes: { ...ctx.hardExcludes, genreLabels },
+    rules: ctx.rules,
+    genreLabels,
     notes: ctx.notes
       .slice()
       .reverse()
@@ -867,16 +870,16 @@ app.put('/api/taste', async (c: Ctx) => {
         next[key] = value;
       }
     }
-    // Manual section edits preserve the derived hard exclusions: only
+    // Manual section edits preserve the derived rules: only
     // a consolidation re-derives them from the raw log.
     await saveTasteRecord(c.env.DB!, profileId, uiLang, {
       sections: next,
-      hardExcludes: existing.hardExcludes,
+      rules: existing.rules,
     });
   } else {
     await saveTasteRecord(c.env.DB!, profileId, uiLang, {
       sections: { ...existing.sections, shared: summary as string },
-      hardExcludes: existing.hardExcludes,
+      rules: existing.rules,
     });
   }
   await invalidateLists(c.env.DB!, profileId);
@@ -913,7 +916,7 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
       sections: parsed.sections,
       contradictions: parsed.contradictions.slice(0, 3),
       languageConflict: parsed.languageConflict,
-      hardExcludes: parsed.hardExcludes,
+      rules: parsed.rules,
       provider: provider.name,
       stub: true,
     });

@@ -66,11 +66,11 @@ const GENRE_WESTERN = 37;
 /**
  * THE fixed TMDB TV genre list (id + canonical English name, verified
  * against /genre/tv/list, 2026-11-15). Single source of truth for
- * derived hard exclusions (2026-11-17): the consolidation prompt
- * receives exactly this list and may only output ids from it, and
- * validateHardExcludes rejects anything not in it. IDs are stable
- * across UI languages; display names are resolved at runtime via the
- * localized TMDB genre map, never from this list.
+ * the genre dimension of preference rules (2026-11-17): the
+ * consolidation prompt receives exactly this list and may only
+ * output ids from it, and validateRules rejects anything not in it.
+ * IDs are stable across UI languages; display names are resolved at
+ * runtime via the localized TMDB genre map, never from this list.
  */
 export const TMDB_TV_GENRES: ReadonlyArray<{ id: number; name: string }> = [
   { id: GENRE_ACTION_ADVENTURE, name: 'Action & Adventure' },
@@ -584,140 +584,416 @@ export function serializeTasteSummary(sections: TasteSections): string {
   return JSON.stringify({ v: TASTE_SUMMARY_VERSION, shared, casual, deep });
 }
 
-// ---------------------------------------------------------------- derived hard exclusions
+// ---------------------------------------------------------------- preference rules
+//
+// UNIFIED RULE MODEL (2026-11-17, Eyal's design): every rule-shaped
+// preference statement becomes a RULE (dimension + operator + value +
+// mode) at consolidation time. Rules then apply two ways:
+//   - hard mode: a FILTER. The show must satisfy the rule or it never
+//     reaches the lists. Decided by categorical wording only.
+//   - soft mode: a RANKING signal. The deterministic post-LLM pass
+//     adds a bounded bonus/penalty (see rerank.RULES_BONUS_WEIGHT).
+//     Decided by preferential wording ("prefer", "love", "like").
+//
+// STRATEGY TABLE — how each dimension applies (one row per dimension;
+// the code below implements exactly this table):
+//
+//   dimension      source (TMDB)         hard match              soft ranking
+//   -------------  --------------------  ----------------------  ---------------------------
+//   genre          genre_ids (retrieval) is: show has genre;     match: +1; miss: -1
+//                                            isNot: lacks it
+//   year           first_air_date (ret.) gte / lte year;         match: +1; miss: -delta,
+//                                            unknown fails open  delta = |year - t| / 25
+//   country        origin_country (ret.) is / isNot code;        match: +1; miss: -1
+//                                            unknown fails open
+//   status         detail.status (detail)  is / isNot status;     match: +1; miss: -1
+//                                            unknown fails open
+//   seasons        detail seasons (detail) gte / lte count;      match: +1; miss: -delta,
+//                                            unknown fails open  delta = |n - t| / 5
+//   episodeMinutes detail runtime (detail) gte / lte minutes;    match: +1; miss: -delta,
+//                                            unknown fails open  delta = |m - t| / 30
+//
+// Deltas are capped at 1. The soft score is the MEAN over evaluable
+// soft rules (unevaluable rules don't dilute it) and 0 when no soft
+// rule applies — profiles without rules see byte-identical ranking.
+//
+// Dimensions NOT in the table, with reasons: language (the profile
+// language filter already owns it — a rule would duplicate/conflict);
+// popularity / vote average (TMDB-internal scores, no reliable
+// wording maps to them); title, networks, keywords, cast (open sets,
+// no fixed list to validate against); TMDB `type` (redundant with
+// genre, detail-only); total hours (derived — seasons + episode
+// minutes cover it); kind casual/deep (a scope, not a dimension —
+// rules are profile-global in v1; section-scoped rules need per-kind
+// pool filtering and are deferred).
+//
+// Retrieval-time dimensions (genre/year/country) filter at ingestion
+// so excluded shows' slots backfill; detail dimensions
+// (status/seasons/episodeMinutes) filter the rank pool after a
+// cached detail enrichment (see engine.ts), because fetching detail
+// for every discovered show would be wasteful. Both stages fail open
+// on missing data.
+
+/** TMDB TV status values (raw strings, as the detail endpoint returns them). */
+export const TMDB_TV_STATUSES: ReadonlyArray<string> = [
+  'Returning Series',
+  'Planned',
+  'In Production',
+  'Ended',
+  'Canceled',
+  'Pilot',
+];
+
+export const TMDB_TV_STATUS_SET: ReadonlySet<string> = new Set(TMDB_TV_STATUSES);
 
 /**
- * Hard exclusions derived from the profile's own preferences at
- * consolidation time (2026-11-17): categorical, category-level
- * rejections ("never reality", "nothing before 2000") become hard
- * retrieval filters. Only dimensions with a fixed, validatable form
- * and retrieval-time data are hard: TMDB TV genre ids (from the fixed
- * list above) and a first-air year range. Anything else (horror has
- * no TV genre; seasons/runtime/status need detail fetches) stays a
- * soft signal in the taste text and the rank prompt.
+ * ISO 3166-1 alpha-2 country codes, fetched from TMDB
+ * /configuration/countries (2026-11-17, 251 codes) — the fixed list
+ * country rules validate against. The prompt carries examples + the
+ * ISO instruction; this set is the server-side authority.
  */
-export interface HardExcludes {
-  /** TMDB TV genre ids to exclude; a show matching ANY is excluded. */
-  genres: number[];
-  /** Exclude shows first aired before this year (null = no floor). */
-  minYear: number | null;
-  /** Exclude shows first aired after this year (null = no ceiling). */
-  maxYear: number | null;
+export const ISO_COUNTRY_CODES: ReadonlySet<string> = new Set([
+  'AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AN', 'AO', 'AQ', 'AR', 'AS',
+  'AT', 'AU', 'AW', 'AZ', 'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI',
+  'BJ', 'BM', 'BN', 'BO', 'BR', 'BS', 'BT', 'BU', 'BV', 'BW', 'BY', 'BZ',
+  'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN', 'CO',
+  'CR', 'CS', 'CU', 'CV', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO',
+  'DZ', 'EC', 'EE', 'EG', 'EH', 'ER', 'ES', 'ET', 'FI', 'FJ', 'FK', 'FM',
+  'FO', 'FR', 'GA', 'GB', 'GD', 'GE', 'GF', 'GH', 'GI', 'GL', 'GM', 'GN',
+  'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM', 'HN', 'HR',
+  'HT', 'HU', 'ID', 'IE', 'IL', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JM',
+  'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY',
+  'KZ', 'LA', 'LB', 'LC', 'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY',
+  'MA', 'MC', 'MD', 'ME', 'MG', 'MH', 'MK', 'ML', 'MM', 'MN', 'MO', 'MP',
+  'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA', 'NC',
+  'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA',
+  'PE', 'PF', 'PG', 'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW',
+  'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW', 'SA', 'SB', 'SC', 'SD', 'SE',
+  'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS', 'ST',
+  'SU', 'SV', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL',
+  'TM', 'TN', 'TO', 'TP', 'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM',
+  'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI', 'VN', 'VU', 'WF', 'WS',
+  'XC', 'XG', 'XI', 'XK', 'YE', 'YT', 'YU', 'ZA', 'ZM', 'ZR', 'ZW',
+]);
+
+export type RuleDimension = 'genre' | 'year' | 'country' | 'status' | 'seasons' | 'episodeMinutes';
+export type RuleOperator = 'is' | 'isNot' | 'gte' | 'lte';
+export type RuleMode = 'hard' | 'soft';
+
+/** One extracted preference rule: a dimension, an operator, a value, and how it applies. */
+export interface PreferenceRule {
+  dimension: RuleDimension;
+  operator: RuleOperator;
+  /** Genre id | year | ISO country code | status string | season count | episode minutes. */
+  value: number | string;
+  mode: RuleMode;
 }
 
-export const EMPTY_HARD_EXCLUDES: HardExcludes = { genres: [], minYear: null, maxYear: null };
+const RULE_DIMENSIONS: ReadonlySet<string> = new Set([
+  'genre',
+  'year',
+  'country',
+  'status',
+  'seasons',
+  'episodeMinutes',
+]);
+
+/** Which operators each dimension allows. Anything else is rejected. */
+const RULE_OPERATORS: Record<RuleDimension, ReadonlySet<RuleOperator>> = {
+  genre: new Set(['is', 'isNot']),
+  year: new Set(['gte', 'lte']),
+  country: new Set(['is', 'isNot']),
+  status: new Set(['is', 'isNot']),
+  seasons: new Set(['gte', 'lte']),
+  episodeMinutes: new Set(['gte', 'lte']),
+};
+
+/** Sanity cap: a profile's rule list never grows unbounded. */
+export const MAX_PREFERENCE_RULES = 20;
 
 const MIN_SANE_YEAR = 1900;
+const MAX_SEASONS = 200;
+const MAX_EPISODE_MINUTES = 300;
 
-function saneYear(value: unknown): number | null {
-  if (typeof value !== 'number' || !Number.isInteger(value)) return null;
-  const maxSane = new Date().getUTCFullYear() + 1;
-  if (value < MIN_SANE_YEAR || value > maxSane) return null;
-  return value;
+function saneRuleValue(dimension: RuleDimension, value: unknown): number | string | null {
+  switch (dimension) {
+    case 'genre':
+      return typeof value === 'number' && Number.isInteger(value) && TMDB_TV_GENRE_IDS.has(value)
+        ? value
+        : null;
+    case 'year': {
+      if (typeof value !== 'number' || !Number.isInteger(value)) return null;
+      const maxSane = new Date().getUTCFullYear() + 1;
+      return value >= MIN_SANE_YEAR && value <= maxSane ? value : null;
+    }
+    case 'country': {
+      if (typeof value !== 'string') return null;
+      const code = value.toUpperCase();
+      return /^[A-Z]{2}$/.test(code) && ISO_COUNTRY_CODES.has(code) ? code : null;
+    }
+    case 'status':
+      return typeof value === 'string' && TMDB_TV_STATUS_SET.has(value) ? value : null;
+    case 'seasons':
+      return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= MAX_SEASONS
+        ? value
+        : null;
+    case 'episodeMinutes':
+      return typeof value === 'number' &&
+        Number.isInteger(value) &&
+        value >= 1 &&
+        value <= MAX_EPISODE_MINUTES
+        ? value
+        : null;
+  }
 }
 
 /**
- * Validate a model- (or stored-) supplied hard-exclusion object.
- * Unknown genre ids are DROPPED (the fixed list is the only authority
- * — a hallucinated id must never filter anything); out-of-range or
- * non-integer years are dropped; an inverted range drops both years.
- * Never throws; malformed input yields empty exclusions.
+ * Validate a model- (or stored-) supplied rule list. Every rule must
+ * name a known dimension, an operator that dimension allows, and a
+ * value inside the dimension's fixed list/range; anything else is
+ * DROPPED. Mode defaults to soft (fail-safe: a malformed rule must
+ * never become a hard filter by accident). Duplicates collapse;
+ * the list caps at MAX_PREFERENCE_RULES. Never throws.
  */
-export function validateHardExcludes(raw: unknown): HardExcludes {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...EMPTY_HARD_EXCLUDES };
-  const rec = raw as { genres?: unknown; minYear?: unknown; maxYear?: unknown };
-  const genres: number[] = [];
-  if (Array.isArray(rec.genres)) {
-    const seen = new Set<number>();
-    for (const g of rec.genres) {
-      if (typeof g === 'number' && Number.isInteger(g) && TMDB_TV_GENRE_IDS.has(g) && !seen.has(g)) {
-        seen.add(g);
-        genres.push(g);
-      }
+export function validateRules(raw: unknown): PreferenceRule[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const rules: PreferenceRule[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const rec = item as { dimension?: unknown; operator?: unknown; value?: unknown; mode?: unknown };
+    if (typeof rec.dimension !== 'string' || !RULE_DIMENSIONS.has(rec.dimension)) continue;
+    const dimension = rec.dimension as RuleDimension;
+    if (
+      typeof rec.operator !== 'string' ||
+      !RULE_OPERATORS[dimension].has(rec.operator as RuleOperator)
+    ) {
+      continue;
     }
-    genres.sort((a, b) => a - b);
+    const value = saneRuleValue(dimension, rec.value);
+    if (value === null) continue;
+    const mode: RuleMode = rec.mode === 'hard' ? 'hard' : 'soft';
+    const key = `${dimension}|${rec.operator}|${value}|${mode}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rules.push({ dimension, operator: rec.operator as RuleOperator, value, mode });
+    if (rules.length >= MAX_PREFERENCE_RULES) break;
   }
-  let minYear = saneYear(rec.minYear);
-  let maxYear = saneYear(rec.maxYear);
+  return rules;
+}
+
+/**
+ * Migrate the superseded hardExcludes shape (shipped 2026-11-17
+ * morning, replaced by rules the same day) into equivalent hard
+ * rules: excluded genres -> isNot/hard, year bounds -> gte/lte/hard.
+ * Used only when reading stored rows that still carry the old key.
+ */
+export function rulesFromLegacyExcludes(raw: unknown): PreferenceRule[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const rec = raw as { genres?: unknown; minYear?: unknown; maxYear?: unknown };
+  const draft: unknown[] = [];
+  if (Array.isArray(rec.genres)) {
+    for (const g of rec.genres) {
+      draft.push({ dimension: 'genre', operator: 'isNot', value: g, mode: 'hard' });
+    }
+  }
+  const saneYear = (v: unknown): number | null => {
+    if (typeof v !== 'number' || !Number.isInteger(v)) return null;
+    const maxSane = new Date().getUTCFullYear() + 1;
+    return v >= MIN_SANE_YEAR && v <= maxSane ? v : null;
+  };
+  const minYear = saneYear(rec.minYear);
+  const maxYear = saneYear(rec.maxYear);
   if (minYear !== null && maxYear !== null && minYear > maxYear) {
-    minYear = null;
-    maxYear = null;
+    // Inverted range: drop both years, keep the genres.
+  } else {
+    if (minYear !== null) draft.push({ dimension: 'year', operator: 'gte', value: minYear, mode: 'hard' });
+    if (maxYear !== null) draft.push({ dimension: 'year', operator: 'lte', value: maxYear, mode: 'hard' });
   }
-  return { genres, minYear, maxYear };
+  return validateRules(draft);
 }
 
-export function hasHardExcludes(ex: HardExcludes): boolean {
-  return ex.genres.length > 0 || ex.minYear !== null || ex.maxYear !== null;
-}
-
-/** A stored taste record: sections + derived hard exclusions. */
+/** A stored taste record: sections + derived preference rules. */
 export interface TasteRecord {
   sections: TasteSections;
-  hardExcludes: HardExcludes;
+  rules: PreferenceRule[];
 }
 
 /**
  * Parse a stored summary into the full record. The v1 JSON shape
- * carries an optional `hardExcludes` key (validated); legacy plain
- * text and JSON without the key read as empty exclusions, so old
- * rows keep working unchanged.
+ * carries an optional `rules` key (validated) and, for rows written
+ * before the rules model, a legacy `hardExcludes` key (converted and
+ * merged). Legacy plain text reads as no rules, so old rows keep
+ * working unchanged.
  */
 export function parseTasteRecord(text: string | null | undefined): TasteRecord {
   const sections = parseTasteSummary(text);
-  if (!text || !text.trim()) return { sections, hardExcludes: { ...EMPTY_HARD_EXCLUDES } };
+  const empty: TasteRecord = { sections, rules: [] };
+  if (!text || !text.trim()) return empty;
   const trimmed = text.trim();
   if (trimmed.startsWith('{')) {
     try {
-      const parsed = JSON.parse(trimmed) as { v?: unknown; hardExcludes?: unknown };
+      const parsed = JSON.parse(trimmed) as {
+        v?: unknown;
+        rules?: unknown;
+        hardExcludes?: unknown;
+      };
       if (parsed && parsed.v === TASTE_SUMMARY_VERSION) {
-        return { sections, hardExcludes: validateHardExcludes(parsed.hardExcludes) };
+        const merged = validateRules([
+          ...(Array.isArray(parsed.rules) ? parsed.rules : []),
+          ...rulesFromLegacyExcludes(parsed.hardExcludes).map((r) => ({ ...r })),
+        ]);
+        return { sections, rules: merged };
       }
     } catch {
-      // Not JSON — legacy plain text, empty exclusions.
+      // Not JSON — legacy plain text, no rules.
     }
   }
-  return { sections, hardExcludes: { ...EMPTY_HARD_EXCLUDES } };
+  return empty;
 }
 
 /**
- * Serialize a record. Plain text only when Shared-only AND no
- * exclusions (preserves the historical shape); otherwise JSON, with
- * the `hardExcludes` key present only when non-empty.
+ * Serialize a record. Plain text only when Shared-only AND no rules
+ * (preserves the historical shape); otherwise JSON, with the `rules`
+ * key present only when non-empty. The legacy `hardExcludes` key is
+ * never written — the next save migrates the row to rules.
  */
 export function serializeTasteRecord(record: TasteRecord): string {
-  const { sections, hardExcludes } = record;
+  const { sections, rules } = record;
   const shared = sections.shared.trim();
   const casual = sections.casual.trim();
   const deep = sections.deep.trim();
-  if (!casual && !deep && !hasHardExcludes(hardExcludes)) return shared;
+  if (!casual && !deep && rules.length === 0) return shared;
   const out: Record<string, unknown> = { v: TASTE_SUMMARY_VERSION, shared, casual, deep };
-  if (hasHardExcludes(hardExcludes)) out.hardExcludes = hardExcludes;
+  if (rules.length > 0) out.rules = rules;
   return JSON.stringify(out);
 }
 
+// ---------------------------------------------------------------- rule application
+
+/** Everything a rule can match against, for one show. Null = unknown (fails open / neutral). */
+export interface ShowFacts {
+  genreIds: number[];
+  year: number | null;
+  originCountry: string[];
+  status: string | null;
+  seasons: number | null;
+  episodeMinutes: number | null;
+}
+
+/** Detail-only subset, attached to candidates after pool enrichment. */
+export interface ShowDetailFacts {
+  status: string | null;
+  seasons: number | null;
+  episodeMinutes: number | null;
+}
+
+export const EMPTY_DETAIL_FACTS: ShowDetailFacts = {
+  status: null,
+  seasons: null,
+  episodeMinutes: null,
+};
+
+/** Delta scales for the soft ranking score (see strategy table). */
+export const RULE_YEAR_DELTA_SCALE = 25;
+export const RULE_SEASONS_DELTA_SCALE = 5;
+export const RULE_MINUTES_DELTA_SCALE = 30;
+
 /**
- * Retrieval-time hard-exclusion check. A show is excluded when ANY of
- * its genre ids is excluded, or its first-air year falls outside the
- * year range. Unknown/missing years fail OPEN (never exclude on
- * missing data — the same rule as unknown durations elsewhere).
+ * Does a show satisfy one rule? Returns null when the fact the rule
+ * needs is unknown — the caller decides: hard filters treat null as
+ * "pass" (fail open), soft scoring skips null rules (neutral).
  */
-export function passesHardExcludes(
-  candidate: { genreIds: number[]; firstAirDate: string },
-  excludes: HardExcludes,
-): boolean {
-  if (!hasHardExcludes(excludes)) return true;
-  if (excludes.genres.length > 0) {
-    const blocked = new Set(excludes.genres);
-    if (candidate.genreIds.some((id) => blocked.has(id))) return false;
-  }
-  if (excludes.minYear !== null || excludes.maxYear !== null) {
-    const year = Number(candidate.firstAirDate.slice(0, 4));
-    if (Number.isInteger(year) && year > 0) {
-      if (excludes.minYear !== null && year < excludes.minYear) return false;
-      if (excludes.maxYear !== null && year > excludes.maxYear) return false;
+export function ruleMatches(facts: ShowFacts, rule: PreferenceRule): boolean | null {
+  switch (rule.dimension) {
+    case 'genre': {
+      const has = facts.genreIds.includes(rule.value as number);
+      return rule.operator === 'is' ? has : !has;
+    }
+    case 'year': {
+      if (facts.year === null) return null;
+      return rule.operator === 'gte' ? facts.year >= (rule.value as number) : facts.year <= (rule.value as number);
+    }
+    case 'country': {
+      if (facts.originCountry.length === 0) return null;
+      const has = facts.originCountry.includes(rule.value as string);
+      return rule.operator === 'is' ? has : !has;
+    }
+    case 'status': {
+      if (facts.status === null) return null;
+      return rule.operator === 'is' ? facts.status === rule.value : facts.status !== rule.value;
+    }
+    case 'seasons': {
+      if (facts.seasons === null) return null;
+      return rule.operator === 'gte'
+        ? facts.seasons >= (rule.value as number)
+        : facts.seasons <= (rule.value as number);
+    }
+    case 'episodeMinutes': {
+      if (facts.episodeMinutes === null) return null;
+      return rule.operator === 'gte'
+        ? facts.episodeMinutes >= (rule.value as number)
+        : facts.episodeMinutes <= (rule.value as number);
     }
   }
+}
+
+/**
+ * How far a show misses a rule, 0..1 (only meaningful when
+ * ruleMatches is false): categorical dimensions miss by 1; numeric
+ * dimensions scale by distance over the dimension's delta scale.
+ */
+export function ruleDistance(facts: ShowFacts, rule: PreferenceRule): number {
+  switch (rule.dimension) {
+    case 'year':
+      if (facts.year === null) return 0;
+      return Math.min(1, Math.abs(facts.year - (rule.value as number)) / RULE_YEAR_DELTA_SCALE);
+    case 'seasons':
+      if (facts.seasons === null) return 0;
+      return Math.min(1, Math.abs(facts.seasons - (rule.value as number)) / RULE_SEASONS_DELTA_SCALE);
+    case 'episodeMinutes':
+      if (facts.episodeMinutes === null) return 0;
+      return Math.min(
+        1,
+        Math.abs(facts.episodeMinutes - (rule.value as number)) / RULE_MINUTES_DELTA_SCALE,
+      );
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Hard-match predicate: a show passes when NO hard rule fails it.
+ * Unknown facts pass (fail open). Soft rules never filter. The same
+ * predicate serves both stages: at ingestion the detail facts are
+ * null, so only retrieval dimensions bind; at the pool stage the
+ * enriched facts bind every dimension.
+ */
+export function passesHardRules(facts: ShowFacts, rules: PreferenceRule[]): boolean {
+  for (const rule of rules) {
+    if (rule.mode !== 'hard') continue;
+    if (ruleMatches(facts, rule) === false) return false;
+  }
   return true;
+}
+
+/**
+ * Soft-match score, -1..1: the mean over evaluable soft rules of
+ * +1 (satisfied) or -distance (missed, scaled for numerics).
+ * Unevaluable rules are skipped, not counted; no evaluable soft
+ * rule means 0 — never a penalty for missing data.
+ */
+export function softRuleScore(facts: ShowFacts, rules: PreferenceRule[]): number {
+  let total = 0;
+  let count = 0;
+  for (const rule of rules) {
+    if (rule.mode !== 'soft') continue;
+    const matched = ruleMatches(facts, rule);
+    if (matched === null) continue;
+    total += matched ? 1 : -ruleDistance(facts, rule);
+    count += 1;
+  }
+  return count === 0 ? 0 : total / count;
 }
 
 /** Taste text for one list kind: Shared + that kind's section. */
@@ -840,8 +1116,8 @@ export interface ConsolidationResult {
   sections: TasteSections;
   contradictions: Contradiction[];
   languageConflict: { languageCode: string; languageName: string } | null;
-  /** Derived hard exclusions, validated against the fixed lists. */
-  hardExcludes: HardExcludes;
+  /** Derived preference rules, validated against the fixed lists. */
+  rules: PreferenceRule[];
 }
 
 function sectionsFromConsolidationJson(parsed: {
@@ -870,13 +1146,13 @@ function sectionsFromConsolidationJson(parsed: {
 
 /**
  * Parse the consolidation response. Accepts the JSON contract
- * {summary: {shared, casual, deep} | string, contradictions, languageConflict, hardExcludes};
+ * {summary: {shared, casual, deep} | string, contradictions, languageConflict, rules};
  * falls back to treating the whole output as a Shared-only summary when
  * it is plain text (no JSON object with a summary key). An all-empty
  * sections object is honored as empty — the raw JSON is never stored
  * as summary text. Contradictions without a valid scope default to
- * Shared (the pre-section contract). hardExcludes is validated
- * against the fixed lists; invalid entries are dropped, never stored.
+ * Shared (the pre-section contract). Rules are validated against the
+ * fixed lists; invalid entries are dropped, never stored.
  */
 export function parseConsolidationResponse(text: string): ConsolidationResult {
   const trimmed = text.trim();
@@ -889,7 +1165,7 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
         sections?: unknown;
         contradictions?: unknown;
         languageConflict?: unknown;
-        hardExcludes?: unknown;
+        rules?: unknown;
       };
       const sections = sectionsFromConsolidationJson(parsed);
       if (sections) {
@@ -927,7 +1203,7 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
           sections,
           contradictions,
           languageConflict,
-          hardExcludes: validateHardExcludes(parsed.hardExcludes),
+          rules: validateRules(parsed.rules),
         };
       }
     } catch {
@@ -939,7 +1215,7 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
     sections: { shared: trimmed, casual: '', deep: '' },
     contradictions: [],
     languageConflict: null,
-    hardExcludes: { ...EMPTY_HARD_EXCLUDES },
+    rules: [],
   };
 }
 

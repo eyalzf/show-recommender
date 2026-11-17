@@ -70,7 +70,7 @@ export const SAFETY_FACTOR = 1.15;
 
 /**
  * Assumed output sizes (tokens) per call type. The maxTokens caps are
- * 1000 (consolidation) / 1200 (rank) / 300 (removal); real outputs run
+ * 1200 (consolidation) / 1200 (rank) / 300 (removal); real outputs run
  * well under the caps, but the assumptions stay generous so the budget
  * errs toward overestimation. Documented here, asserted in test.mjs.
  */
