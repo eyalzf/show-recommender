@@ -20,6 +20,13 @@ export interface TasteResponse {
   summary: string;
   sections: TasteSections;
   summaryLanguage: string;
+  /** Derived hard exclusions (genres + year range), with localized genre labels. */
+  hardExcludes?: {
+    genres: number[];
+    genreLabels: string[];
+    minYear: number | null;
+    maxYear: number | null;
+  };
   notes: { id: string; kind: string; text: string; createdAt: number }[];
   contradiction: TasteContradiction | null;
   languageConflict: { praisedLanguage: string; languageCode?: string; message: string } | null;

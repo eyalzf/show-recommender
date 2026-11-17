@@ -45,6 +45,7 @@ import {
   clusterFor,
   combineTasteSections,
   cosine,
+  EMPTY_HARD_EXCLUDES,
   ensureLanguageMinimums,
   genreDiscoverPlans,
   languagePoolMinimum,
@@ -52,6 +53,7 @@ import {
   paceFor,
   parseRankResponse,
   parseRemovalCheckResponse,
+  passesHardExcludes,
   primaryDiscoverPlans,
   selectCapped,
   structureFor,
@@ -66,7 +68,8 @@ import {
  *
  * Retrieval narrows the catalog to a few dozen candidates:
  *   1. hard filters first — profile languages, rated/dropped/deny-listed
- *      shows excluded, override-excluded duplicates excluded;
+ *      shows excluded, override-excluded duplicates excluded, and the
+ *      profile's derived hard exclusions (genres + year range) applied;
  *   2. candidate sources — TMDB discover ONCE PER PROFILE LANGUAGE
  *      (popularity within that language; a combined-language discover
  *      buried non-English shows entirely — see util.ts), trending,
@@ -318,6 +321,11 @@ async function retrieveCandidates(
     ...ctx.denyIds,
     ...ctx.excludedIds,
   ]);
+  // Derived hard exclusions (genres + year range from the profile's
+  // own categorical rejections) filter at ingestion, like languages:
+  // excluded shows never enter the pool, so their slots go to other
+  // candidates instead of shortening the lists.
+  const hardExcludes = ctx.hardExcludes;
   const genreMap = await getGenreMap(c, uiLang).catch(() => new Map<number, string>());
 
   const byId = new Map<number, Candidate>();
@@ -332,6 +340,7 @@ async function retrieveCandidates(
           mark(existing);
         } else {
           const cand = toCandidate(r, genreMap);
+          if (!passesHardExcludes(cand, hardExcludes)) continue;
           mark(cand);
           byId.set(r.id, cand);
         }
@@ -398,8 +407,10 @@ async function retrieveCandidates(
           if (existing) existing.fromRec = true;
           else {
             const cand = toCandidate(detail, genreMap);
-            cand.fromRec = true;
-            byId.set(rec.tmdbId, cand);
+            if (passesHardExcludes(cand, hardExcludes)) {
+              cand.fromRec = true;
+              byId.set(rec.tmdbId, cand);
+            }
           }
         }
       } catch (err) {
@@ -419,8 +430,10 @@ async function retrieveCandidates(
           if (existing) existing.fromRec = true;
           else {
             const cand = toCandidate(hit, genreMap);
-            cand.fromRec = true;
-            byId.set(hit.id, cand);
+            if (passesHardExcludes(cand, hardExcludes)) {
+              cand.fromRec = true;
+              byId.set(hit.id, cand);
+            }
           }
         }
       }
@@ -1095,12 +1108,16 @@ export async function generateAdhocPick(
     ...(ctx?.excludedIds ?? []),
   ]);
   const genreMap = await getGenreMap(c, uiLang).catch(() => new Map<number, string>());
+  const hardExcludes = ctx?.hardExcludes ?? EMPTY_HARD_EXCLUDES;
   const byId = new Map<number, Candidate>();
   const absorb = (results: TmdbSearchResult[]) => {
     for (const r of results) {
       if (isBlockedId(r.id) || excluded.has(r.id)) continue;
       if (languages.length > 0 && !languages.includes(r.original_language)) continue;
-      if (!byId.has(r.id)) byId.set(r.id, toCandidate(r, genreMap));
+      if (byId.has(r.id)) continue;
+      const cand = toCandidate(r, genreMap);
+      if (!passesHardExcludes(cand, hardExcludes)) continue;
+      byId.set(r.id, cand);
     }
   };
 

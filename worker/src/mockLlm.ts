@@ -1,4 +1,5 @@
 import type { LlmProvider, LlmRequest } from './llm';
+import { TMDB_TV_GENRES, validateHardExcludes, type HardExcludes } from './util';
 
 /**
  * Deterministic mock LLM provider + mock embeddings — the quota-free
@@ -114,6 +115,87 @@ export function routeNote(text: string): 'shared' | 'casual' | 'deep' {
   return 'shared';
 }
 
+// Mock hard-exclusion extraction — SIMULATION ONLY, same caveat as
+// routeNote: the production model extracts by meaning; the mock can
+// only match a categorical marker + a genre cue word in the same NOTE
+// line (ratings never count — a rating of one show is not a category
+// rejection). Genre ids resolve through the FIXED list, so the mock
+// can never emit an id the server would reject — and the server
+// validates anyway. Deliberately narrow: mild wording ("prefer less")
+// and unmappable categories ("horror", "musical") produce no
+// exclusion, exactly like production's rules.
+const EXCLUSION_MARKERS = [
+  'never', "don't like", 'dont like', 'hate', "can't stand", 'cant stand',
+  'avoid', 'no ', 'not a fan', 'dislike',
+  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה',
+];
+
+const GENRE_CUE_WORDS: Array<{ name: string; words: string[] }> = [
+  { name: 'Action & Adventure', words: ['action', 'adventure', 'אקשן', 'הרפתקאות'] },
+  { name: 'Animation', words: ['animation', 'animated', 'אנימציה', 'מצויר'] },
+  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומדיה', 'סיטקום'] },
+  { name: 'Crime', words: ['crime', 'פשע'] },
+  { name: 'Documentary', words: ['documentary', 'documentaries', 'דוקו'] },
+  { name: 'Drama', words: ['drama', 'דרמה'] },
+  { name: 'Family', words: ['family', 'משפחה'] },
+  { name: 'Kids', words: ['kids', "children's", 'children', 'ילדים'] },
+  { name: 'Mystery', words: ['mystery', 'מסתורין'] },
+  { name: 'News', words: ['news', 'חדשות'] },
+  { name: 'Reality', words: ['reality', 'ריאליטי', 'ריאלטי'] },
+  { name: 'Sci-Fi & Fantasy', words: ['sci-fi', 'science fiction', 'fantasy', 'מדע בדיוני', 'פנטזיה'] },
+  { name: 'Soap', words: ['soap', 'טלנובלה', 'סבון'] },
+  { name: 'Talk', words: ['talk show', 'talkshow', 'אירוח'] },
+  { name: 'War & Politics', words: ['war shows', 'politics', 'מלחמה', 'פוליטיקה'] },
+  { name: 'Western', words: ['western', 'מערבון'] },
+];
+
+/** Extract hard exclusions from note statements. Exported for selftest. */
+export function extractMockHardExcludes(notes: string[]): HardExcludes {
+  const genreIdByName = new Map(TMDB_TV_GENRES.map((g) => [g.name, g.id]));
+  const genres = new Set<number>();
+  let minYear: number | null = null;
+  let maxYear: number | null = null;
+  for (const statement of notes) {
+    const lower = statement.toLowerCase();
+    if (EXCLUSION_MARKERS.some((m) => lower.includes(m.toLowerCase()))) {
+      for (const cue of GENRE_CUE_WORDS) {
+        if (cue.words.some((w) => lower.includes(w.toLowerCase()))) {
+          const id = genreIdByName.get(cue.name);
+          if (id !== undefined) genres.add(id);
+        }
+      }
+    }
+    // Year boundaries. "Before" is ambiguous on its own ("nothing
+    // before 2000" wants 2000+, "only before 2000" wants pre-2000),
+    // so bare "before YYYY" is SKIPPED (when in doubt, omit — the
+    // production rule). Only unambiguous phrasings map:
+    // nothing/no/none before YYYY -> minYear YYYY (exclude older);
+    // nothing/no/none after YYYY -> maxYear YYYY (exclude newer);
+    // only ... before YYYY -> maxYear YYYY-1 (exclude newer);
+    // after/since/from YYYY -> minYear YYYY (after: YYYY+1);
+    // until/up to/through YYYY -> maxYear YYYY. Hebrew mirrors:
+    // שום דבר/כלום לפני -> minYear; שום דבר/כלום אחרי -> maxYear;
+    // רק לפני -> maxYear-1; מ-/משנת/החל מ- -> minYear; עד -> maxYear.
+    const nothingBefore = /(?:nothing|none|no)\b[^.]*?\bbefore\s+(\d{4})|(?:שום דבר|כלום)\s+לפני\s+(\d{4})/i.exec(statement);
+    if (nothingBefore) minYear = Number(nothingBefore[1] ?? nothingBefore[2]);
+    const nothingAfter = /(?:nothing|none|no)\b[^.]*?\bafter\s+(\d{4})|(?:שום דבר|כלום)\s+אחרי\s+(\d{4})/i.exec(statement);
+    if (nothingAfter) maxYear = Number(nothingAfter[1] ?? nothingAfter[2]);
+    const onlyBefore = /only\b[^.]*before\s+(\d{4})|רק\s+לפני\s+(\d{4})/i.exec(statement);
+    if (onlyBefore) maxYear = Number(onlyBefore[1] ?? onlyBefore[2]) - 1;
+    if (!nothingAfter) {
+      const after = /after\s+(\d{4})/i.exec(statement);
+      if (after) minYear = Number(after[1]) + 1;
+    }
+    const sinceFrom = /(?:since|from)\s+(\d{4})/i.exec(statement);
+    if (sinceFrom) minYear = Number(sinceFrom[1]);
+    const heAfter = /(?:מ-|החל מ-?|משנת)\s*(\d{4})/.exec(statement);
+    if (heAfter) minYear = Number(heAfter[1]);
+    const until = /(?:until|up to|through)\s+(\d{4})|עד\s+(\d{4})/i.exec(statement);
+    if (until) maxYear = Number(until[1] ?? until[2]);
+  }
+  return validateHardExcludes({ genres: [...genres], minYear, maxYear });
+}
+
 /**
  * Mock consolidation: echo the prompt's raw-note lines into the three
  * sections deterministically. Rating lines always land in Shared (the
@@ -130,6 +212,7 @@ function mockConsolidation(userText: string): string {
     casual: [],
     deep: [],
   };
+  const noteStatements: string[] = [];
   for (const line of notesPart.split('\n')) {
     const match = /^-\s*\[(note|rating:[^\]]+)\]\s*(.+)$/.exec(line.trim());
     if (!match) continue;
@@ -140,6 +223,7 @@ function mockConsolidation(userText: string): string {
       sections.shared.push(statement);
     } else {
       sections[routeNote(statement)].push(statement);
+      noteStatements.push(statement);
     }
   }
   return JSON.stringify({
@@ -150,6 +234,7 @@ function mockConsolidation(userText: string): string {
     },
     contradictions: [],
     languageConflict: null,
+    hardExcludes: extractMockHardExcludes(noteStatements),
   });
 }
 

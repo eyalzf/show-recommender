@@ -1,6 +1,6 @@
 import type { Env } from './env';
 import { MockLlmProvider } from './mockLlm';
-import { formatSectionsForPrompt, type TasteSections } from './util';
+import { formatSectionsForPrompt, TMDB_TV_GENRES, type TasteSections } from './util';
 
 /**
  * LLM layer — one small interface, swappable providers.
@@ -188,10 +188,13 @@ export interface ConsolidationNote {
  *
  * The model returns a JSON object: the consolidated summary in THREE
  * sections (Shared / Casual / Deep focus), any same-section
- * contradictions it spotted, and a language conflict when the notes
- * praise a language outside the profile's hard filter. The caller falls
- * back to plain-text handling when the output is not JSON (see
- * util.parseConsolidationResponse).
+ * contradictions it spotted, a language conflict when the notes
+ * praise a language outside the profile's hard filter, and derived
+ * HARD EXCLUSIONS (genre ids from the fixed TMDB list + an optional
+ * year range) for categorical, category-level rejections. The caller
+ * validates every exclusion against the fixed lists and drops
+ * anything invalid (see util.validateHardExcludes) — the model can
+ * only ever exclude what the fixed list allows.
  *
  * Routing rules (the default-to-Shared rule is load-bearing: on any
  * ambiguity the statement stays Shared, which is exactly the old
@@ -216,6 +219,7 @@ export function buildConsolidationPrompt(
     .map((n) => `- [${n.source === 'note' ? 'note' : `rating:${n.kind}`}] ${n.text}`)
     .join('\n');
   const existingText = existing ? formatSectionsForPrompt(existing) : '';
+  const genreList = TMDB_TV_GENRES.map((g) => `${g.id}=${g.name}`).join(', ');
   return {
     system:
       'You consolidate a household TV profile\'s taste notes into a taste description in THREE sections: ' +
@@ -237,9 +241,20 @@ export function buildConsolidationPrompt(
       'CONTRADICTIONS are scoped: list one ONLY when a newer note genuinely conflicts with the current summary or an older note WITHIN THE SAME SECTION. ' +
       'A Casual statement and a Deep-focus statement that look opposed (e.g. "nothing slow" for casual vs "love a slow burn" for deep focus) are NOT a contradiction — they coexist in different sections, never flag them. ' +
       'Each contradiction carries its scope, and the proposed merge must honor both sides within that scope. ' +
+      'HARD EXCLUSIONS — derive ONLY from categorical, category-level rejections in the notes: wording that rejects a WHOLE genre or era, such as "never", "no", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי"), applied to a genre name or an explicit year/era boundary ("nothing before 2000", "only 90s shows", "משנות ה-2000 ואילך"). ' +
+      'Output genre ids ONLY from this fixed list, never any other id: ' +
+      genreList +
+      '. Never invent a genre: horror, musical, thriller-as-genre, and anything else not in the list stays in the prose summary and NEVER appears in hardExcludes. ' +
+      'Mild or comparative wording ("prefer less", "not usually", "less interested", "מעדיף פחות") NEVER becomes a hard exclusion — it stays in the prose summary. ' +
+      'A rejection of a SPECIFIC show is NOT a hard exclusion (per-show feedback already handles it) — only whole-category rejections qualify. ' +
+      'Recompute from the FULL log every time: if a newer note retracts an old rejection, the exclusion is REMOVED — never carry an exclusion forward that the current notes no longer support. ' +
+      'WHEN IN DOUBT, omit the exclusion. An empty hardExcludes is always safe; a wrong one hides shows the user would like. ' +
+      'Years are integers only: "nothing before 2000" means minYear 2000; "only shows from the 90s" means minYear 1990 and maxYear 1999; no year wording means both null. ' +
       'Return ONLY a JSON object with this shape, no other text: ' +
       '{"summary": {"shared": "...", "casual": "...", "deep": "..."}, "contradictions": [{"scope": "shared", "oldText": "...", "newText": "...", "proposedMerge": "..."}], ' +
-      '"languageConflict": {"languageCode": "ko", "languageName": "Korean"} or null}. ' +
+      '"languageConflict": {"languageCode": "ko", "languageName": "Korean"} or null, ' +
+      '"hardExcludes": {"genres": [10764], "minYear": null, "maxYear": null}}. ' +
+      'hardExcludes is ALWAYS present; empty means {"genres": [], "minYear": null, "maxYear": null}. ' +
       'Empty sections are empty strings. ' +
       'Set languageConflict only when the notes praise a language ' +
       `NOT in this allowed list: [${allowedLanguages.join(', ')}]. ` +

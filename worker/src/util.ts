@@ -63,6 +63,36 @@ const GENRE_TALK = 10767;
 const GENRE_WAR_POLITICS = 10768;
 const GENRE_WESTERN = 37;
 
+/**
+ * THE fixed TMDB TV genre list (id + canonical English name, verified
+ * against /genre/tv/list, 2026-11-15). Single source of truth for
+ * derived hard exclusions (2026-11-17): the consolidation prompt
+ * receives exactly this list and may only output ids from it, and
+ * validateHardExcludes rejects anything not in it. IDs are stable
+ * across UI languages; display names are resolved at runtime via the
+ * localized TMDB genre map, never from this list.
+ */
+export const TMDB_TV_GENRES: ReadonlyArray<{ id: number; name: string }> = [
+  { id: GENRE_ACTION_ADVENTURE, name: 'Action & Adventure' },
+  { id: GENRE_ANIMATION, name: 'Animation' },
+  { id: GENRE_COMEDY, name: 'Comedy' },
+  { id: GENRE_CRIME, name: 'Crime' },
+  { id: GENRE_DOCUMENTARY, name: 'Documentary' },
+  { id: GENRE_DRAMA, name: 'Drama' },
+  { id: GENRE_FAMILY, name: 'Family' },
+  { id: GENRE_KIDS, name: 'Kids' },
+  { id: GENRE_MYSTERY, name: 'Mystery' },
+  { id: GENRE_NEWS, name: 'News' },
+  { id: GENRE_REALITY, name: 'Reality' },
+  { id: GENRE_SCIFI_FANTASY, name: 'Sci-Fi & Fantasy' },
+  { id: GENRE_SOAP, name: 'Soap' },
+  { id: GENRE_TALK, name: 'Talk' },
+  { id: GENRE_WAR_POLITICS, name: 'War & Politics' },
+  { id: GENRE_WESTERN, name: 'Western' },
+];
+
+export const TMDB_TV_GENRE_IDS: ReadonlySet<number> = new Set(TMDB_TV_GENRES.map((g) => g.id));
+
 const CASUAL_GENRE_IDS = new Set([
   GENRE_COMEDY,
   GENRE_REALITY,
@@ -554,6 +584,142 @@ export function serializeTasteSummary(sections: TasteSections): string {
   return JSON.stringify({ v: TASTE_SUMMARY_VERSION, shared, casual, deep });
 }
 
+// ---------------------------------------------------------------- derived hard exclusions
+
+/**
+ * Hard exclusions derived from the profile's own preferences at
+ * consolidation time (2026-11-17): categorical, category-level
+ * rejections ("never reality", "nothing before 2000") become hard
+ * retrieval filters. Only dimensions with a fixed, validatable form
+ * and retrieval-time data are hard: TMDB TV genre ids (from the fixed
+ * list above) and a first-air year range. Anything else (horror has
+ * no TV genre; seasons/runtime/status need detail fetches) stays a
+ * soft signal in the taste text and the rank prompt.
+ */
+export interface HardExcludes {
+  /** TMDB TV genre ids to exclude; a show matching ANY is excluded. */
+  genres: number[];
+  /** Exclude shows first aired before this year (null = no floor). */
+  minYear: number | null;
+  /** Exclude shows first aired after this year (null = no ceiling). */
+  maxYear: number | null;
+}
+
+export const EMPTY_HARD_EXCLUDES: HardExcludes = { genres: [], minYear: null, maxYear: null };
+
+const MIN_SANE_YEAR = 1900;
+
+function saneYear(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null;
+  const maxSane = new Date().getUTCFullYear() + 1;
+  if (value < MIN_SANE_YEAR || value > maxSane) return null;
+  return value;
+}
+
+/**
+ * Validate a model- (or stored-) supplied hard-exclusion object.
+ * Unknown genre ids are DROPPED (the fixed list is the only authority
+ * — a hallucinated id must never filter anything); out-of-range or
+ * non-integer years are dropped; an inverted range drops both years.
+ * Never throws; malformed input yields empty exclusions.
+ */
+export function validateHardExcludes(raw: unknown): HardExcludes {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...EMPTY_HARD_EXCLUDES };
+  const rec = raw as { genres?: unknown; minYear?: unknown; maxYear?: unknown };
+  const genres: number[] = [];
+  if (Array.isArray(rec.genres)) {
+    const seen = new Set<number>();
+    for (const g of rec.genres) {
+      if (typeof g === 'number' && Number.isInteger(g) && TMDB_TV_GENRE_IDS.has(g) && !seen.has(g)) {
+        seen.add(g);
+        genres.push(g);
+      }
+    }
+    genres.sort((a, b) => a - b);
+  }
+  let minYear = saneYear(rec.minYear);
+  let maxYear = saneYear(rec.maxYear);
+  if (minYear !== null && maxYear !== null && minYear > maxYear) {
+    minYear = null;
+    maxYear = null;
+  }
+  return { genres, minYear, maxYear };
+}
+
+export function hasHardExcludes(ex: HardExcludes): boolean {
+  return ex.genres.length > 0 || ex.minYear !== null || ex.maxYear !== null;
+}
+
+/** A stored taste record: sections + derived hard exclusions. */
+export interface TasteRecord {
+  sections: TasteSections;
+  hardExcludes: HardExcludes;
+}
+
+/**
+ * Parse a stored summary into the full record. The v1 JSON shape
+ * carries an optional `hardExcludes` key (validated); legacy plain
+ * text and JSON without the key read as empty exclusions, so old
+ * rows keep working unchanged.
+ */
+export function parseTasteRecord(text: string | null | undefined): TasteRecord {
+  const sections = parseTasteSummary(text);
+  if (!text || !text.trim()) return { sections, hardExcludes: { ...EMPTY_HARD_EXCLUDES } };
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as { v?: unknown; hardExcludes?: unknown };
+      if (parsed && parsed.v === TASTE_SUMMARY_VERSION) {
+        return { sections, hardExcludes: validateHardExcludes(parsed.hardExcludes) };
+      }
+    } catch {
+      // Not JSON — legacy plain text, empty exclusions.
+    }
+  }
+  return { sections, hardExcludes: { ...EMPTY_HARD_EXCLUDES } };
+}
+
+/**
+ * Serialize a record. Plain text only when Shared-only AND no
+ * exclusions (preserves the historical shape); otherwise JSON, with
+ * the `hardExcludes` key present only when non-empty.
+ */
+export function serializeTasteRecord(record: TasteRecord): string {
+  const { sections, hardExcludes } = record;
+  const shared = sections.shared.trim();
+  const casual = sections.casual.trim();
+  const deep = sections.deep.trim();
+  if (!casual && !deep && !hasHardExcludes(hardExcludes)) return shared;
+  const out: Record<string, unknown> = { v: TASTE_SUMMARY_VERSION, shared, casual, deep };
+  if (hasHardExcludes(hardExcludes)) out.hardExcludes = hardExcludes;
+  return JSON.stringify(out);
+}
+
+/**
+ * Retrieval-time hard-exclusion check. A show is excluded when ANY of
+ * its genre ids is excluded, or its first-air year falls outside the
+ * year range. Unknown/missing years fail OPEN (never exclude on
+ * missing data — the same rule as unknown durations elsewhere).
+ */
+export function passesHardExcludes(
+  candidate: { genreIds: number[]; firstAirDate: string },
+  excludes: HardExcludes,
+): boolean {
+  if (!hasHardExcludes(excludes)) return true;
+  if (excludes.genres.length > 0) {
+    const blocked = new Set(excludes.genres);
+    if (candidate.genreIds.some((id) => blocked.has(id))) return false;
+  }
+  if (excludes.minYear !== null || excludes.maxYear !== null) {
+    const year = Number(candidate.firstAirDate.slice(0, 4));
+    if (Number.isInteger(year) && year > 0) {
+      if (excludes.minYear !== null && year < excludes.minYear) return false;
+      if (excludes.maxYear !== null && year > excludes.maxYear) return false;
+    }
+  }
+  return true;
+}
+
 /** Taste text for one list kind: Shared + that kind's section. */
 export function tasteTextForKind(sections: TasteSections, kind: 'casual' | 'deep'): string {
   return [sections.shared.trim(), sections[kind].trim()].filter(Boolean).join('\n');
@@ -674,6 +840,8 @@ export interface ConsolidationResult {
   sections: TasteSections;
   contradictions: Contradiction[];
   languageConflict: { languageCode: string; languageName: string } | null;
+  /** Derived hard exclusions, validated against the fixed lists. */
+  hardExcludes: HardExcludes;
 }
 
 function sectionsFromConsolidationJson(parsed: {
@@ -702,12 +870,13 @@ function sectionsFromConsolidationJson(parsed: {
 
 /**
  * Parse the consolidation response. Accepts the JSON contract
- * {summary: {shared, casual, deep} | string, contradictions, languageConflict};
+ * {summary: {shared, casual, deep} | string, contradictions, languageConflict, hardExcludes};
  * falls back to treating the whole output as a Shared-only summary when
  * it is plain text (no JSON object with a summary key). An all-empty
  * sections object is honored as empty — the raw JSON is never stored
  * as summary text. Contradictions without a valid scope default to
- * Shared (the pre-section contract).
+ * Shared (the pre-section contract). hardExcludes is validated
+ * against the fixed lists; invalid entries are dropped, never stored.
  */
 export function parseConsolidationResponse(text: string): ConsolidationResult {
   const trimmed = text.trim();
@@ -720,6 +889,7 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
         sections?: unknown;
         contradictions?: unknown;
         languageConflict?: unknown;
+        hardExcludes?: unknown;
       };
       const sections = sectionsFromConsolidationJson(parsed);
       if (sections) {
@@ -757,6 +927,7 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
           sections,
           contradictions,
           languageConflict,
+          hardExcludes: validateHardExcludes(parsed.hardExcludes),
         };
       }
     } catch {
@@ -768,6 +939,7 @@ export function parseConsolidationResponse(text: string): ConsolidationResult {
     sections: { shared: trimmed, casual: '', deep: '' },
     contradictions: [],
     languageConflict: null,
+    hardExcludes: { ...EMPTY_HARD_EXCLUDES },
   };
 }
 

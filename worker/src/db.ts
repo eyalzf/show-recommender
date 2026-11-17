@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { normalizeTitle, parseTasteSummary, serializeTasteSummary, type TasteSections } from './util';
+import { normalizeTitle, parseTasteRecord, parseTasteSummary, serializeTasteRecord, serializeTasteSummary, type HardExcludes, type TasteRecord, type TasteSections } from './util';
 
 /**
  * D1 access for profile-scoped state. Every function here takes an
@@ -71,6 +71,8 @@ export interface ProfileContext {
   tasteSummary: string | null;
   /** Stored summary parsed into Shared/Casual/Deep sections (see util.ts storage note). Legacy plain text reads as Shared-only. */
   tasteSections: TasteSections;
+  /** Derived hard exclusions stored with the summary (validated; empty for legacy rows). */
+  hardExcludes: HardExcludes;
   externalRecs: ExternalRecRow[];
 }
 
@@ -242,6 +244,7 @@ export async function loadProfileContext(
 
   const showFeedback = feedback.filter((f) => f.kind === 'show').slice().reverse();
   const summaryText = summary?.summary_text ?? null;
+  const tasteRecord = parseTasteRecord(summaryText);
   return {
     profile,
     feedback,
@@ -255,7 +258,8 @@ export async function loadProfileContext(
     excludedIds,
     overrides,
     tasteSummary: summaryText,
-    tasteSections: parseTasteSummary(summaryText),
+    tasteSections: tasteRecord.sections,
+    hardExcludes: tasteRecord.hardExcludes,
     externalRecs,
   };
 }
@@ -352,6 +356,29 @@ export async function saveTasteSections(
   sections: TasteSections,
 ): Promise<void> {
   await saveTasteSummary(db, profileId, uiLang, serializeTasteSummary(sections));
+}
+
+/** Read the stored summary as the full record (sections + hard exclusions). */
+export async function loadTasteRecord(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+): Promise<TasteRecord> {
+  const row = await db
+    .prepare('SELECT summary_text FROM taste_summaries WHERE profile_id = ? AND ui_language = ?')
+    .bind(profileId, uiLang)
+    .first<{ summary_text: string }>();
+  return parseTasteRecord(row?.summary_text ?? null);
+}
+
+/** Save the full record (sections + hard exclusions). */
+export async function saveTasteRecord(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+  record: TasteRecord,
+): Promise<void> {
+  await saveTasteSummary(db, profileId, uiLang, serializeTasteRecord(record));
 }
 
 /**

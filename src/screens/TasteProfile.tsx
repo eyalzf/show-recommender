@@ -43,6 +43,12 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   const [draft, setDraft] = useState('');
   const [stub, setStub] = useState(false);
   const [contradiction, setContradiction] = useState<TasteContradiction | null>(null);
+  const [hardExcludes, setHardExcludes] = useState<{
+    genres: number[];
+    genreLabels: string[];
+    minYear: number | null;
+    maxYear: number | null;
+  } | null>(null);
   const [languageConflict, setLanguageConflict] = useState<{
     praisedLanguage: string;
     languageCode?: string;
@@ -73,6 +79,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         setSections(sectionsFromResponse(res));
         setStub(Boolean(res.stub));
         setContradiction(res.contradiction);
+        setHardExcludes(res.hardExcludes ?? null);
         setLanguageConflict(res.languageConflict);
         if (res.profile) setLanguages(res.profile.languages);
       })
@@ -195,6 +202,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
           if (JSON.stringify(latest) !== before || Date.now() >= deadline) {
             setSections(latest);
             setContradiction(res.contradiction);
+            setHardExcludes(res.hardExcludes ?? null);
             setLanguageConflict(res.languageConflict);
             break;
           }
@@ -215,6 +223,20 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   // calculation settles, a genuinely empty section keeps its minimal
   // empty presentation.
   const calculating = loadingTaste || updating;
+
+  // Derived hard exclusions, shown read-only: they come from the notes
+  // (a categorical rejection), and a new note is what changes them.
+  const yearText = (() => {
+    if (!hardExcludes) return '';
+    const { minYear, maxYear } = hardExcludes;
+    if (minYear !== null && maxYear !== null) return `${minYear}–${maxYear}`;
+    if (minYear !== null) return `${t(lang, 'tasteFromYear')} ${minYear}`;
+    if (maxYear !== null) return `${t(lang, 'tasteUntilYear')} ${maxYear}`;
+    return '';
+  })();
+  const excludeParts = hardExcludes
+    ? [...hardExcludes.genreLabels, yearText].filter(Boolean)
+    : [];
 
   return (
     <section>
@@ -275,6 +297,14 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
           )}
         </div>
       ))}
+
+      {excludeParts.length > 0 ? (
+        <div className="taste-section">
+          <h3>{t(lang, 'tasteNeverShowing')}</h3>
+          <p className="summary-text">{excludeParts.join(' · ')}</p>
+          <p className="taste-hint">{t(lang, 'tasteNeverShowingHint')}</p>
+        </div>
+      ) : null}
 
       {contradiction ? (
         <div className="contradiction">
