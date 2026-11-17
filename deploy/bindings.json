@@ -1,1 +1,1 @@
-[{"database_id":"42a31581-ed97-4ec9-9c68-8a8afae31cba","name":"DB","type":"d1"},{"bucket_name":"show-recommender","name":"PROFILE_ICONS","type":"r2_bucket"},{"name":"AI","type":"ai"}]
+[{"database_id":"42a31581-ed97-4ec9-9c68-8a8afae31cba","name":"DB","type":"d1"},{"bucket_name":"show-recommender","name":"PROFILE_ICONS","type":"r2_bucket"},{"name":"AI","type":"ai"},{"name":"LLM_RANK_MODEL","text":"@cf/meta/llama-3.1-8b-instruct-fp8-fast","type":"plain_text"}]

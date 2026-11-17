@@ -87,6 +87,9 @@ The chat/embedding model ids are env-configurable (`LLM_MODEL`,
 `EMBEDDING_MODEL`), defaulting to Llama 3.3 70B + BGE-M3. The
 overrides are a LOCAL-run knob only — neither Worker sets them.
 A cheap local-run option is `@cf/meta/llama-3.1-8b-instruct-fp8`.
+(`LLM_RANK_MODEL` is the one exception: production bindings set it
+to the 8B model per the 2026-11-17 split-model decision; dev never
+sets it, so the rank model follows `LLM_MODEL` there.)
 Notes:
 
 - The non-fp8 `@cf/meta/llama-3.1-8b-instruct` id was deprecated

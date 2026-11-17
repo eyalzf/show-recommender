@@ -74,6 +74,8 @@ snapshotted first (settings API read-back), the secret binding is
 verified present after every upload, and the mock config is restored
 in a `finally` block and verified via settings + `/api/health`. There
 is no per-request model override anywhere in the Worker, by design.
+`LLM_RANK_MODEL` is never set on dev, so the rank model follows
+`LLM_MODEL` and each flip measures one model on both tasks.
 
 ## Cost accounting
 

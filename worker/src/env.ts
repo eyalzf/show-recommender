@@ -31,8 +31,20 @@ export interface Env {
    * Chat-model override for the real provider (a Workers AI model id).
    * Unset = the production default (Llama 3.3 70B). A local-run knob
    * only — set on neither Worker (see docs/dev-verification.md).
+   * This is the CONSOLIDATION model; ranking uses LLM_RANK_MODEL
+   * when set, else this model (see llm.resolveRankModel).
    */
   LLM_MODEL?: string;
+  /**
+   * Ranking-model override for the real provider (a Workers AI model
+   * id): list ranking, the removal check, and ad-hoc rationales.
+   * Unset = the consolidation model above. SET IN PRODUCTION
+   * bindings (deploy/bindings.json) to the 8B model per the
+   * 2026-11-17 benchmark decision (split model: 70B consolidates,
+   * 8B ranks). Never set on the dev Worker — dev is mock-only and
+   * the var is inert there.
+   */
+  LLM_RANK_MODEL?: string;
   /**
    * Embedding-model override for the real provider. Unset = BGE-M3.
    * A local-run knob only — set on neither Worker.

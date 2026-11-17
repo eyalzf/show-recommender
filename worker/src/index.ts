@@ -21,6 +21,7 @@ import {
 import {
   buildConsolidationPrompt,
   getLlmProvider,
+  getRankLlmProvider,
   isDevWorker,
   resolveLlmMode,
   type ConsolidationNote,
@@ -127,6 +128,10 @@ app.get('/api/health', (c) => {
     // and the provider name makes a misconfigured mock deploy visible.
     dev: isDevWorker(c.env),
     llmProvider: getLlmProvider(c.env).name,
+    // Split model (2026-11-17): consolidation runs on llmProvider,
+    // ranking/removal/ad-hoc on rankModel. Identical when
+    // LLM_RANK_MODEL is unset.
+    rankModel: getRankLlmProvider(c.env).name,
   });
 });
 
@@ -986,7 +991,7 @@ app.post('/api/adhoc', async (c: Ctx) => {
       .bind(crypto.randomUUID(), profileId, String(query).trim(), JSON.stringify(result), Date.now())
       .run();
   }
-  return c.json({ result, provider: getLlmProvider(c.env).name, stub: false });
+  return c.json({ result, provider: getRankLlmProvider(c.env).name, stub: false });
 });
 
 // ---------------------------------------------------------------- static assets

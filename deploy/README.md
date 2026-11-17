@@ -13,8 +13,12 @@ python3 ~/workspace/show-recommender-tools/deploy_worker.py show-recommender-dev
 
 ## `bindings.json` — PRODUCTION. Do not add dev flags here.
 
-Production bindings are ONLY the D1 database, the R2 bucket, and the
-AI binding. In particular, NEVER add these to production bindings:
+Production bindings are the D1 database, the R2 bucket, the AI
+binding, and ONE plain-text var: `LLM_RANK_MODEL` set to the 8B
+model (`@cf/meta/llama-3.1-8b-instruct-fp8-fast`) per the
+2026-11-17 split-model decision — consolidation stays on the 70B
+default, ranking/removal/ad-hoc run on 8B. In particular, NEVER add
+these to production bindings:
 
 - `LLM_PROVIDER=mock` — would silently replace the real model with
   the deterministic mock for real users.
@@ -24,7 +28,8 @@ The code defaults to the real provider with no flags set, and there
 is no per-request override path at all (unit-tested) — but the
 bindings are the first line of defense: production must carry no dev
 configuration at all. After every production deploy, verify
-`/api/health` shows the real provider and `dev: false`.
+`/api/health` shows the real provider (`llmProvider` 70B,
+`rankModel` 8B) and `dev: false`.
 
 Secrets (TMDB_READ_TOKEN) are set separately via the Cloudflare
 dashboard/API and survive script uploads; they are not in these files.

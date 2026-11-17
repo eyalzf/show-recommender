@@ -18,7 +18,7 @@ import {
   buildAdhocRationalePrompt,
   buildRankPrompt,
   buildRemovalCheckPrompt,
-  getLlmProvider,
+  getRankLlmProvider,
 } from './llm';
 import { candidateEmbedText, embedTextsWithEnv } from './embeddings';
 import {
@@ -637,7 +637,7 @@ async function rankKind(
   uiLang: string,
 ): Promise<{ ranked: RankedEntry[]; shortReason: string | null }> {
   if (candidates.length === 0) return { ranked: [], shortReason: null };
-  const provider = getLlmProvider(c.env);
+  const provider = getRankLlmProvider(c.env);
   const fallbackRationale =
     uiLang === 'he' ? 'תואם את פרופיל הטעם.' : 'Matches your taste profile.';
   const byId = new Map(candidates.map((cand) => [cand.tmdbId, cand]));
@@ -751,7 +751,7 @@ async function removalCheck(
   const checkSet = ordered.slice(0, REMOVAL_CHECK_SIZE);
   const validIds = new Set(checkSet.map((e) => e.tmdbId));
   try {
-    const provider = getLlmProvider(c.env);
+    const provider = getRankLlmProvider(c.env);
     const text = await provider.generate(
       buildRemovalCheckPrompt(
         negatives.map((m) => ({ title: m.title, year: m.year, genres: m.genreNames })),
@@ -1150,7 +1150,7 @@ export async function generateAdhocPick(
     pick = candidates[0];
   }
 
-  const provider = getLlmProvider(c.env);
+  const provider = getRankLlmProvider(c.env);
   const rationale = await provider.generate(
     buildAdhocRationalePrompt(
       query,

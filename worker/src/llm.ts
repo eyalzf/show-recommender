@@ -30,6 +30,17 @@ import { formatSectionsForPrompt, type TasteSections } from './util';
  * change the provider at runtime, so production can never be switched
  * to the mock or a cheaper model by a request. See
  * docs/dev-verification.md.
+ *
+ * SPLIT MODEL (decided 2026-11-17 from the scripts/bench/ benchmark):
+ * taste consolidation runs on the consolidation model (LLM_MODEL
+ * override, else the 70B default), while list ranking, the removal
+ * check, and ad-hoc rationales run on the ranking model
+ * (LLM_RANK_MODEL when set, else the consolidation model —
+ * resolveRankModel / getRankLlmProvider). The benchmark showed the
+ * 8B model structurally sound on ranking (kind-fit, caps,
+ * contradiction detection all perfect) at ~6x lower cost, with its
+ * quality gaps confined to consolidation wording — hence the split.
+ * Embeddings are unaffected (EMBEDDING_MODEL, else BGE-M3).
  */
 
 export interface LlmRequest {
@@ -133,6 +144,33 @@ export function getLlmProvider(env: Env): LlmProvider {
   const mode = resolveLlmMode(env);
   if (mode.kind === 'mock') return new MockLlmProvider();
   if (mode.kind === 'real') return new WorkersAiLlamaProvider(env.AI!, mode.model);
+  return new StubLlmProvider();
+}
+
+/**
+ * Ranking-model resolution (split model, 2026-11-17): the model list
+ * ranking, the removal check, and ad-hoc rationales run on.
+ * LLM_RANK_MODEL when set, else the consolidation model. Null under
+ * mock/stub (no real model in play). Pure function of env, like
+ * resolveLlmMode — no per-request override. Unit-tested in
+ * scripts/selftest.mjs.
+ */
+export function resolveRankModel(env: Env): string | null {
+  const mode = resolveLlmMode(env);
+  if (mode.kind !== 'real') return null;
+  return env.LLM_RANK_MODEL ?? mode.model;
+}
+
+/**
+ * The ranking provider: same mock/stub behavior as getLlmProvider,
+ * bound to the ranking model when real. Ranking call sites
+ * (engine.ts rankKind, removal check, ad-hoc rationale) use this;
+ * consolidation call sites keep getLlmProvider.
+ */
+export function getRankLlmProvider(env: Env): LlmProvider {
+  const mode = resolveLlmMode(env);
+  if (mode.kind === 'mock') return new MockLlmProvider();
+  if (mode.kind === 'real') return new WorkersAiLlamaProvider(env.AI!, env.LLM_RANK_MODEL ?? mode.model);
   return new StubLlmProvider();
 }
 

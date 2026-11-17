@@ -643,6 +643,45 @@ assert.equal(llm.isDevWorker({ IS_DEV_WORKER: 'true' }), true);
 assert.equal(llm.isDevWorker({}), false);
 assert.equal(llm.isDevWorker({ IS_DEV_WORKER: '1' }), false);
 
+// --- split model (2026-11-17): consolidation on LLM_MODEL/70B, ranking on LLM_RANK_MODEL ---
+assert.equal(llm.resolveRankModel({ AI: fakeAi }), llm.DEFAULT_CHAT_MODEL);
+assert.equal(llm.getRankLlmProvider({ AI: fakeAi }).name, 'workers-ai:llama-3.3-70b');
+assert.equal(
+  llm.resolveRankModel({ AI: fakeAi, LLM_MODEL: 'custom-model' }),
+  'custom-model',
+);
+assert.equal(
+  llm.getRankLlmProvider({ AI: fakeAi, LLM_MODEL: 'custom-model' }).name,
+  'workers-ai:custom-model',
+);
+assert.equal(
+  llm.resolveRankModel({ AI: fakeAi, LLM_RANK_MODEL: 'rank-model' }),
+  'rank-model',
+);
+assert.equal(
+  llm.getRankLlmProvider({ AI: fakeAi, LLM_RANK_MODEL: 'rank-model' }).name,
+  'workers-ai:rank-model',
+);
+// The rank override never moves consolidation off its own model.
+assert.equal(
+  llm.getLlmProvider({ AI: fakeAi, LLM_RANK_MODEL: 'rank-model' }).name,
+  'workers-ai:llama-3.3-70b',
+);
+assert.deepEqual(llm.resolveLlmMode({ AI: fakeAi, LLM_RANK_MODEL: 'rank-model' }), {
+  kind: 'real',
+  model: llm.DEFAULT_CHAT_MODEL,
+});
+// Rank override wins over the LLM_MODEL override for ranking only.
+assert.equal(
+  llm.getRankLlmProvider({ AI: fakeAi, LLM_MODEL: 'custom-model', LLM_RANK_MODEL: 'rank-model' }).name,
+  'workers-ai:rank-model',
+);
+// Mock/stub: no real model to resolve, same provider behavior as consolidation.
+assert.equal(llm.resolveRankModel({ AI: fakeAi, LLM_PROVIDER: 'mock' }), null);
+assert.equal(llm.getRankLlmProvider({ AI: fakeAi, LLM_PROVIDER: 'mock' }).name, 'mock');
+assert.equal(llm.resolveRankModel({}), null);
+assert.equal(llm.getRankLlmProvider({}).name, 'stub');
+
 // --- embedTextsWithEnv: mock returns vectors without touching AI; real path uses the model override ---
 const mockVecs = await embeddings.embedTextsWithEnv({ LLM_PROVIDER: 'mock', AI: fakeAi }, ['a', 'b']);
 assert.equal(mockVecs.length, 2);
