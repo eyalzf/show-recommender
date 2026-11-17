@@ -131,9 +131,10 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
     try {
       const res = await api.setActiveMood(profile.id, moodId);
       onProfileChanged?.(res.profile);
-      const m = await api.moods(profile.id, lang);
-      setMoods(m.moods);
-      setGenreLabels(m.genreLabels ?? {});
+      // Deliberately no moods refetch here: the server bumps
+      // last_used_at, but the chip order stays as loaded until the
+      // next view mount (refresh / navigation away and back), when
+      // the mount effect fetches the new recency order.
     } catch (err) {
       setActiveMoodId(prev);
       load(false, prev ?? '');
