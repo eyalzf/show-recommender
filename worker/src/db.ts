@@ -419,6 +419,71 @@ export async function updateTasteInputHash(
 }
 
 /**
+ * Claim-guard TTL: a claim older than this is treated as orphaned
+ * (its run crashed before releasing) and may be reclaimed. Generous
+ * vs a single 70B call; the mock is instant.
+ */
+export const CONSOLIDATION_CLAIM_TTL_MS = 120_000;
+
+/**
+ * Claim the consolidation MUTEX for one (profile, language): the
+ * INSERT is atomic, so at most one run per profile+language holds
+ * it at a time, whatever the input. Returns the claim token
+ * (claimed_at, ms) on success, or null when another run holds the
+ * mutex — the caller must skip, even if the holder finished
+ * between the conflict and any re-read (re-claiming would
+ * duplicate its save, because the caller's context predates its
+ * fingerprint stamp). A crashed holder's orphaned row is removed
+ * by the cleanup DELETE below on a later attempt (TTL), so a
+ * conflict never blocks consolidation permanently. Callers MUST
+ * pair a token with releaseConsolidationClaim in a finally block.
+ */
+export async function tryClaimConsolidation(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+  inputHash: string,
+): Promise<number | null> {
+  const now = Date.now();
+  // Opportunistic cleanup of orphaned claims (crashed runs).
+  await db
+    .prepare('DELETE FROM consolidation_claims WHERE claimed_at < ?')
+    .bind(now - CONSOLIDATION_CLAIM_TTL_MS)
+    .run();
+  try {
+    await db
+      .prepare(
+        'INSERT INTO consolidation_claims (profile_id, ui_language, input_hash, claimed_at) VALUES (?, ?, ?, ?)',
+      )
+      .bind(profileId, uiLang, inputHash, now)
+      .run();
+    return now;
+  } catch {
+    // PK conflict: another run holds (or just held) the mutex.
+    return null;
+  }
+}
+
+/**
+ * Release a mutex acquired by tryClaimConsolidation. Deletes only
+ * the row matching the caller's token, so a slow run's release can
+ * never steal a successor's claim after a TTL takeover. Idempotent.
+ */
+export async function releaseConsolidationClaim(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+  claimedAt: number,
+): Promise<void> {
+  await db
+    .prepare(
+      'DELETE FROM consolidation_claims WHERE profile_id = ? AND ui_language = ? AND claimed_at = ?',
+    )
+    .bind(profileId, uiLang, claimedAt)
+    .run();
+}
+
+/**
  * Reservoir-aware invalidation: a taste-affecting change (new tip,
  * manual section edit, language-filter change, consolidation that
  * actually changed the summary) clears the DISPLAYED snapshots but

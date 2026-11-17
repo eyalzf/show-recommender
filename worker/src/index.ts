@@ -48,10 +48,12 @@ import {
   loadTasteRecord,
   matchFeedbackForShow,
   pruneStoredLists,
+  releaseConsolidationClaim,
   saveStoredList,
   saveTasteRecord,
   seedPresetMoods,
   setActiveMood,
+  tryClaimConsolidation,
   updateProfile,
   updateTasteInputHash,
   type BootstrapStatus,
@@ -932,7 +934,11 @@ app.post('/api/notes', async (c: Ctx) => {
  * Returns 'not_found' when the profile does not exist, 'no_ai' when no
  * AI binding is present — a stub "summary" must never be saved.
  * The prompt contains ONLY user-authored text (see llm.ts terms
- * guardrail). The raw log is never modified.
+ * guardrail). The raw log is never modified. Concurrent runs are
+ * serialized by the claim-guard mutex (see tryClaimConsolidation):
+ * the holder re-checks the fingerprint against freshly reloaded
+ * state, and a run that loses the mutex returns the stored record
+ * without calling the model.
  */
 interface ConsolidationOutcome {
   summary: string;
@@ -956,10 +962,10 @@ async function consolidateFromLog(
   // Mock mode needs no AI binding (the mock never calls Workers AI);
   // the stub path must still never save a canned "summary".
   if (!env.AI && resolveLlmMode(env).kind !== 'mock') return 'no_ai';
-  const ctx = await loadProfileContext(db, profileId, uiLang);
+  let ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) return 'not_found';
   const provider = getLlmProvider(env);
-  const notes = buildConsolidationNotes(ctx.feedback);
+  let notes = buildConsolidationNotes(ctx.feedback);
   if (notes.length === 0) {
     // Nothing to consolidate from — no LLM call, nothing saved.
     return {
@@ -971,13 +977,16 @@ async function consolidateFromLog(
       provider: provider.name,
     };
   }
-  // Skip-when-unchanged: the stored record already derives from
-  // exactly this input (same notes, same model, same input
-  // version) — no model call, nothing saved. Temperature 0 makes
-  // re-runs reproducible, so a skip is behavior-identical to a call.
-  // A stored record must exist: a NULL/absent fingerprint (never
-  // consolidated, or a pre-migration row) always differs.
-  const fingerprint = consolidationInputFingerprint(notes, provider.name);
+  // Skip-when-unchanged, cheap fast path: the stored record already
+  // derives from exactly this input (same notes, same model, same
+  // input version) — no model call, nothing saved. Temperature 0
+  // makes re-runs reproducible, so a skip is behavior-identical to
+  // a call. A stored record must exist: a NULL/absent fingerprint
+  // (never consolidated, or a pre-migration row) always differs.
+  // This check is NOT authoritative under concurrency — the context
+  // may predate another run's stamp — so it is repeated against
+  // freshly reloaded state inside the mutex below.
+  let fingerprint = consolidationInputFingerprint(notes, provider.name);
   if (ctx.tasteSummary != null && fingerprint === ctx.tasteInputHash) {
     return {
       summary: '',
@@ -988,71 +997,145 @@ async function consolidateFromLog(
       provider: provider.name,
     };
   }
-  const snapshotMaxCreatedAt = ctx.feedback.reduce((m, f) => Math.max(m, f.createdAt), 0);
-  const raw = await provider.generate(
-    buildConsolidationPrompt(notes, uiLang, ctx.tasteSections, ctx.profile.languages),
-  );
-  const parsed = parseConsolidationResponse(raw);
-  // Validate + ground via the single extraction service (notes only:
-  // rating lines never ground a rule — per-show feedback is not a
-  // category statement). Applies to every provider, mock included.
-  const rules = resolveRules(
-    parsed.rules,
-    notes.filter((n) => n.source === 'note').map((n) => n.text),
-  );
-  // Keyword heuristic supplements the LLM's language-conflict call.
-  const heuristic = detectLanguageConflict(
-    notes.map((n) => n.text),
-    ctx.profile.languages,
-  );
-  const languageConflict =
-    parsed.languageConflict ??
-    (heuristic
-      ? {
-          languageCode: heuristic.languageCode,
-          languageName: heuristic.languageName,
-          message:
-            uiLang === 'he'
-              ? `ההערות משבחות ${heuristic.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
-              : `Your notes praise ${heuristic.languageName}, but it is not in this profile's language filter.`,
+  // Claim-guard (mutex): at most one consolidation per
+  // (profile, language) runs at a time. Without it, the Preferences
+  // polling loop (a taste read every 2s) schedules a fresh run on
+  // every poll until the first run stamps the fingerprint — a
+  // stampede of redundant 70B calls. A run that loses the mutex
+  // returns the stored record; the winning run's save (if it
+  // changes the record) invalidates, so the next read/refresh sees
+  // fresh state. The guard itself fails open: if claiming errors,
+  // the run proceeds unguarded (a duplicate consolidation is
+  // wasteful, never wrong) rather than breaking the caller's flow.
+  let claimToken: number | null = null;
+  try {
+    claimToken = await tryClaimConsolidation(db, profileId, uiLang, fingerprint);
+    if (claimToken === null) {
+      return {
+        summary: '',
+        sections: { ...ctx.tasteSections },
+        contradictions: [],
+        languageConflict: null,
+        rules: ctx.rules,
+        provider: provider.name,
+      };
+    }
+  } catch (err) {
+    console.error('consolidation claim failed, proceeding unguarded', err);
+  }
+  const owned = claimToken !== null;
+  try {
+    // Authoritative check, INSIDE the mutex, against freshly
+    // reloaded state: the fast path above raced with concurrent
+    // runs — a run that loaded stale context before another run's
+    // stamp, but claimed after its release, would duplicate the
+    // save. Reloading here (and proceeding on the fresh context)
+    // closes that gap: a winner's stamp is always visible to the
+    // next holder.
+    const fresh = await loadProfileContext(db, profileId, uiLang);
+    if (!fresh) return 'not_found';
+    ctx = fresh;
+    notes = buildConsolidationNotes(ctx.feedback);
+    if (notes.length === 0) {
+      return {
+        summary: '',
+        sections: { ...ctx.tasteSections },
+        contradictions: [],
+        languageConflict: null,
+        rules: ctx.rules,
+        provider: provider.name,
+      };
+    }
+    fingerprint = consolidationInputFingerprint(notes, provider.name);
+    if (ctx.tasteSummary != null && fingerprint === ctx.tasteInputHash) {
+      return {
+        summary: '',
+        sections: { ...ctx.tasteSections },
+        contradictions: [],
+        languageConflict: null,
+        rules: ctx.rules,
+        provider: provider.name,
+      };
+    }
+    const snapshotMaxCreatedAt = ctx.feedback.reduce((m, f) => Math.max(m, f.createdAt), 0);
+    const raw = await provider.generate(
+      buildConsolidationPrompt(notes, uiLang, ctx.tasteSections, ctx.profile.languages),
+    );
+    const parsed = parseConsolidationResponse(raw);
+    // Validate + ground via the single extraction service (notes only:
+    // rating lines never ground a rule — per-show feedback is not a
+    // category statement). Applies to every provider, mock included.
+    const rules = resolveRules(
+      parsed.rules,
+      notes.filter((n) => n.source === 'note').map((n) => n.text),
+    );
+    // Keyword heuristic supplements the LLM's language-conflict call.
+    const heuristic = detectLanguageConflict(
+      notes.map((n) => n.text),
+      ctx.profile.languages,
+    );
+    const languageConflict =
+      parsed.languageConflict ??
+      (heuristic
+        ? {
+            languageCode: heuristic.languageCode,
+            languageName: heuristic.languageName,
+            message:
+              uiLang === 'he'
+                ? `ההערות משבחות ${heuristic.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
+                : `Your notes praise ${heuristic.languageName}, but it is not in this profile's language filter.`,
+          }
+        : null);
+    if (parsed.summary) {
+      // Staleness guard: skip saving when newer feedback landed after our
+      // snapshot — the next refresh or Preferences read consolidates
+      // the fuller log, so a slow earlier run never clobbers a
+      // fresher summary.
+      const latest = await db
+        .prepare('SELECT MAX(created_at) AS m FROM feedback_log WHERE profile_id = ?')
+        .bind(profileId)
+        .first<{ m: number | null }>();
+      if ((latest?.m ?? 0) <= snapshotMaxCreatedAt) {
+        // No-op guard: a consolidation that reproduces the stored
+        // record (sections trimmed, rules as a set) changes nothing —
+        // skip the save AND the invalidation, so a rating whose taste
+        // already says the same thing costs no regeneration.
+        const next = { sections: parsed.sections, rules };
+        const current = { sections: ctx.tasteSections, rules: ctx.rules };
+        if (!tasteRecordsEqual(next, current)) {
+          await saveTasteRecord(db, profileId, uiLang, next);
+          await invalidateLists(db, profileId);
         }
-      : null);
-  if (parsed.summary) {
-    // Staleness guard: skip saving when newer feedback landed after our
-    // snapshot — that write's own trigger consolidates the fuller log,
-    // so a slow earlier run never clobbers a fresher summary.
-    const latest = await db
-      .prepare('SELECT MAX(created_at) AS m FROM feedback_log WHERE profile_id = ?')
-      .bind(profileId)
-      .first<{ m: number | null }>();
-    if ((latest?.m ?? 0) <= snapshotMaxCreatedAt) {
-      // No-op guard: a consolidation that reproduces the stored
-      // record (sections trimmed, rules as a set) changes nothing —
-      // skip the save AND the invalidation, so a rating whose taste
-      // already says the same thing costs no regeneration.
-      const next = { sections: parsed.sections, rules };
-      const current = { sections: ctx.tasteSections, rules: ctx.rules };
-      if (!tasteRecordsEqual(next, current)) {
-        await saveTasteRecord(db, profileId, uiLang, next);
-        await invalidateLists(db, profileId);
+        // The input was consumed — stamp its fingerprint even on the
+        // no-op path, so the next trigger skips the call instead of
+        // re-running it. Inside the staleness guard: a stale run must
+        // not stamp a fingerprint for input it never saw. Stamped
+        // AFTER the save so a first consolidation stamps a row that
+        // exists.
+        await updateTasteInputHash(db, profileId, uiLang, fingerprint);
       }
-      // The input was consumed — stamp its fingerprint even on the
-      // no-op path, so the next trigger skips the call instead of
-      // re-running it. Inside the staleness guard: a stale run must
-      // not stamp a fingerprint for input it never saw. Stamped
-      // AFTER the save so a first consolidation stamps a row that
-      // exists.
-      await updateTasteInputHash(db, profileId, uiLang, fingerprint);
+    }
+    return {
+      summary: parsed.summary,
+      sections: parsed.sections,
+      contradictions: parsed.contradictions.slice(0, 3),
+      languageConflict,
+      rules,
+      provider: provider.name,
+    };
+  } finally {
+    // Released on every path — success, stale, empty output, or
+    // throw — so a failed run never blocks retries past the TTL.
+    // Best-effort: a release failure must never mask the outcome.
+    // Only a held mutex is released, and only by its own token.
+    if (owned && claimToken !== null) {
+      try {
+        await releaseConsolidationClaim(db, profileId, uiLang, claimToken);
+      } catch (err) {
+        console.error('consolidation claim release failed', err);
+      }
     }
   }
-  return {
-    summary: parsed.summary,
-    sections: parsed.sections,
-    contradictions: parsed.contradictions.slice(0, 3),
-    languageConflict,
-    rules,
-    provider: provider.name,
-  };
 }
 
 /**
@@ -1062,10 +1145,9 @@ async function consolidateFromLog(
  * schedule it — the taste record catches up lazily at the next
  * refresh instead (see listsResponse). Best effort — a failed
  * consolidation must never fail the write, and the next trigger
- * (or the lazy pre-generation check) retries it. Rapid successive
- * writes may race; every run derives from the full raw log, and
- * temperature 0 makes same-input runs identical, so results
- * converge.
+ * (or the lazy pre-generation check) retries it. Concurrent runs
+ * are serialized by the claim-guard mutex inside
+ * consolidateFromLog — only the holder calls the model.
  */
 function scheduleConsolidation(c: Ctx, profileId: string, uiLang: string): void {
   if (!hasDb(c)) return;

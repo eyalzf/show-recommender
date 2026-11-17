@@ -1001,6 +1001,64 @@ assert.equal(
 ); // timestamps are not input
 assert.equal(llm.CONSOLIDATION_INPUT_VERSION, 2); // v2: text-only input + show-name output ban
 
+// --- consolidation claim-guard protocol (fake D1) ---
+// Minimal D1 stand-in: only the statements the claim helpers issue.
+// Claims key on (profile, language) — the mutex — with the input
+// hash informational.
+function makeFakeD1() {
+  const claims = new Map(); // 'profile|lang' -> { hash, claimedAt }
+  const key = (p, l) => `${p}|${l}`;
+  return {
+    claims,
+    prepare(sql) {
+      return {
+        bind(...args) {
+          return {
+            async run() {
+              if (sql.startsWith('DELETE FROM consolidation_claims WHERE claimed_at')) {
+                for (const [k, v] of [...claims]) if (v.claimedAt < args[0]) claims.delete(k);
+                return {};
+              }
+              if (sql.startsWith('INSERT INTO consolidation_claims')) {
+                const k = key(args[0], args[1]);
+                if (claims.has(k)) throw new Error('UNIQUE constraint failed');
+                claims.set(k, { hash: args[2], claimedAt: args[3] });
+                return {};
+              }
+              if (sql.startsWith('DELETE FROM consolidation_claims WHERE profile_id')) {
+                const k = key(args[0], args[1]);
+                if (claims.get(k)?.claimedAt === args[2]) claims.delete(k);
+                return {};
+              }
+              throw new Error(`unexpected SQL: ${sql}`);
+            },
+            async first() {
+              throw new Error(`unexpected SQL: ${sql}`);
+            },
+          };
+        },
+      };
+    },
+  };
+}
+const dbmod = await bundleModule('db', 'db.ts');
+const fakeD1 = makeFakeD1();
+const token1 = await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'he', 'aaa');
+assert.equal(typeof token1, 'number');
+assert.equal(await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'he', 'aaa'), null); // same input: denied
+assert.equal(await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'he', 'bbb'), null); // mutex: ANY input denied while held
+assert.equal(typeof (await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'en', 'aaa')), 'number'); // other language: allowed
+assert.equal(fakeD1.claims.size, 2);
+await dbmod.releaseConsolidationClaim(fakeD1, 'p1', 'he', token1 + 1); // wrong token: no release
+assert.equal(await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'he', 'ccc'), null);
+await dbmod.releaseConsolidationClaim(fakeD1, 'p1', 'he', token1);
+assert.equal(typeof (await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'he', 'aaa')), 'number'); // released: claimable
+await dbmod.releaseConsolidationClaim(fakeD1, 'p1', 'he', 999); // idempotent, no throw
+// Expired claim is reclaimed (opportunistic cleanup deletes it first).
+fakeD1.claims.set('p1|he', { hash: 'old', claimedAt: Date.now() - dbmod.CONSOLIDATION_CLAIM_TTL_MS - 1 });
+assert.equal(typeof (await dbmod.tryClaimConsolidation(fakeD1, 'p1', 'he', 'old')), 'number');
+assert.equal(fakeD1.claims.size, 2);
+
 // --- mock Hebrew cue routing (dev-only simulation fidelity) ---
 // Eyal's exact dev-profile sentences route to the right sections when
 // each is its own note (the mock routes per statement line, as the

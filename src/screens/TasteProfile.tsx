@@ -181,11 +181,15 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       }
       return;
     }
-    // The server consolidates in the background on every note write.
-    // The cards show the calculating state (below) while a sticky
-    // toast carries the progress message; both retire when the fresh
-    // sections arrive. Poll until the sections change or a sane
-    // timeout, then show whatever the server returns — never hang.
+    // Consolidation is deferred and fingerprint-gated: the note
+    // write itself schedules nothing post-bootstrap, so the first
+    // poll below schedules it (the taste self-heal), and the
+    // server's claim-guard dedupes the overlapping polls into a
+    // single run. The cards show the calculating state (below)
+    // while a sticky toast carries the progress message; both
+    // retire when the fresh sections arrive. Poll until the
+    // sections change or a sane timeout, then show whatever the
+    // server returns — never hang.
     notify(t(lang, 'noteUpdating'), { key: 'note-updating', sticky: true });
     setUpdating(true);
     try {
