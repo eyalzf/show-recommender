@@ -829,6 +829,7 @@ assert.ok(exclReq.system.includes('THREE sections'));
 assert.ok(exclReq.system.includes('10764=Reality'));
 assert.ok(exclReq.system.includes('RULES'));
 assert.ok(exclReq.system.includes('Returning Series'));
+assert.ok(exclReq.system.includes('EXPLICITLY named')); // anti-inference clause: no invented categories
 const exclParsed = util.parseConsolidationResponse(await mockProvider.generate(exclReq));
 assert.deepEqual(exclParsed.rules, [MR('genre', 'isNot', 10764, 'hard')]);
 

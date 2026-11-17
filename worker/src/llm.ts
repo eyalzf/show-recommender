@@ -253,7 +253,9 @@ export function buildConsolidationPrompt(
       'One statement may yield several rules ("short comedies from the 90s" yields three). ' +
       'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק"). ' +
       'Everything else rule-shaped is soft: "prefer", "love", "like", "more of", "lean toward", "מעדיף/ה", "אוהב/ת". ' +
-      'Mild or comparative wording ("prefer less", "not usually", "מעדיף פחות") becomes a SOFT rule with the negated operator, never hard. ' +
+      'Mild or comparative wording ("prefer less", "prefers not", "not usually", "מעדיף פחות", "מעדיף לא") becomes a SOFT rule with the negated operator, never hard. ' +
+      'RULES COVER ONLY WHAT THE NOTES NAME: emit a rule only for a category, dimension, or value EXPLICITLY named in the notes. ' +
+      'Never infer a related category — current-affairs shows do not imply talk shows, daily shows do not imply news, and a rejection of one genre never extends to another. If the notes reject X, the rule covers X only. ' +
       'NO RULE when: the statement names no concrete dimension or value (vague: "character-driven", "well-written", "good shows"); it rejects a SPECIFIC show (per-show feedback handles that); it is about LANGUAGE (the profile language filter owns language — keep it in the prose summary only); or it names a category with no fixed value (horror, musical, thriller-as-genre have no genre id — prose only, NEVER invent an id). ' +
       'Recompute from the FULL log every time: if a newer note retracts an old statement, its rule is REMOVED — never carry a rule forward that the current notes no longer support. On a genuine conflict the NEWEST statement wins for rules (and flag the contradiction as usual). ' +
       'WHEN IN DOUBT, omit the rule. An empty rules array is always safe; a wrong rule hides or mis-ranks shows the user would like. ' +
