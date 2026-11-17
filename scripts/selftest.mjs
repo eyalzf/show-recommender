@@ -463,6 +463,44 @@ assert.deepEqual(
   [R('year', 'gte', 2011, 'soft')], // +/-1 boundary derivation still grounds
 );
 
+// --- groundRules: unified vocabulary (stems, countries, synonyms) ---
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ['סדרות ללא ריאליטי']),
+  [R('genre', 'isNot', 10764, 'hard')], // 'ללא' is categorical
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ['I cannot stand reality shows']),
+  [R('genre', 'isNot', 10764, 'hard')],
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ["I'm sick of reality shows"]),
+  [R('genre', 'isNot', 10764, 'hard')],
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'is', 18, 'hard')], ['דרמות בלבד']),
+  [R('genre', 'is', 18, 'hard')], // stem 'דרמ' grounds the plural
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'is', 35, 'hard')], ['רק קומדיות']),
+  [R('genre', 'is', 35, 'hard')], // stem 'קומד' grounds the plural
+);
+assert.deepEqual(
+  util.groundRules([R('country', 'is', 'IT', 'hard')], ['אוהב סדרות איטלקיות']),
+  [R('country', 'is', 'IT', 'soft')], // extended country cues; liking wording stays soft
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10767, 'hard')], ['לא אוהב תוכניות יומיות']),
+  [R('genre', 'isNot', 10767, 'hard')], // 'יומי' grounds Talk too — daily shows are ambiguous
+);
+assert.deepEqual(
+  util.groundRules([R('status', 'is', 'Ended', 'hard')], ['רק סדרות שנגמרו']),
+  [R('status', 'is', 'Ended', 'hard')], // 'נגמר' grounds Ended
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ['מעדיף שלא לראות ריאליטי']),
+  [R('genre', 'isNot', 10764, 'soft')], // mild wording never keeps hard
+);
+
 // --- groundRules: 'בלבד' / 'בלי' / 'without' are categorical (mood probe 17 Nov) ---
 assert.deepEqual(
   util.groundRules(
@@ -523,7 +561,7 @@ assert.deepEqual(util.groundRules([R('genre', 'isNot', 10764, 'hard')], []), [])
 for (const g of util.TMDB_TV_GENRES) {
   assert.ok(util.GENRE_GROUNDING_CUES.some((c) => c.name === g.name && c.words.length > 0));
 }
-assert.ok(util.GENRE_GROUNDING_CUES.find((c) => c.name === 'News').words.includes('אקטואליה'));
+assert.ok(util.GENRE_GROUNDING_CUES.find((c) => c.name === 'News').words.includes('אקטואל')); // stem covers אקטואליה/אקטואלי
 
 // --- reservoir: parse/serialize, thresholds, taste equality ---
 const mkEntry = (id, extra = {}) => ({
@@ -903,6 +941,7 @@ async function bundleModule(name, entry) {
 
 const llm = await bundleModule('llm', 'llm.ts');
 const mockLlm = await bundleModule('mock', 'mockLlm.ts');
+const rules = await bundleModule('rules', 'rules.ts');
 const embeddings = await bundleModule('embed', 'embeddings.ts');
 
 const fakeAi = { run: async () => { throw new Error('real AI must not be called in selftest'); } };
@@ -1009,6 +1048,28 @@ assert.deepEqual(mockLlm.extractMockRules(['אוהב סדרות קומיות ק�
   MR('genre', 'is', 35, 'soft'),
   MR('seasons', 'gte', 3, 'soft'),
 ]);
+// Unified vocabulary + post-cue inclusion: bare-cue statements now
+// emit rules, mild wording flips the operator, and a post-cue modal
+// ("only", "בלבד") includes instead of excluding.
+assert.deepEqual(mockLlm.extractMockRules(['בא לי דרמה']), [MR('genre', 'is', 18, 'soft')]);
+assert.deepEqual(mockLlm.extractMockRules(['I want comedies']), [MR('genre', 'is', 35, 'soft')]);
+assert.deepEqual(mockLlm.extractMockRules(['מעדיף לא ריאליטי']), [
+  MR('genre', 'isNot', 10764, 'soft'), // mild: negated operator, soft
+]);
+assert.deepEqual(mockLlm.extractMockRules(['comedies only']), [MR('genre', 'is', 35, 'hard')]);
+assert.deepEqual(mockLlm.extractMockRules(['דרמה ישראלית בלבד, בלי תוכניות ריאליטי']), [
+  MR('genre', 'is', 18, 'hard'),
+  MR('genre', 'isNot', 10764, 'hard'),
+  MR('country', 'is', 'IL', 'hard'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['I love Italian dramas']), [
+  MR('genre', 'is', 18, 'soft'),
+  MR('country', 'is', 'IT', 'soft'),
+]);
+assert.deepEqual(mockLlm.extractMockRules(['לא אוהב תוכניות יומיות']), [
+  MR('genre', 'isNot', 10763, 'hard'),
+  MR('genre', 'isNot', 10767, 'hard'),
+]);
 // End-to-end through the real prompt builder + mock provider + parser:
 // the prompt carries the fixed list, the mock emits the rule, the
 // parser validates it — and the 'THREE sections' mock-detection
@@ -1078,15 +1139,53 @@ assert.equal(moodReq.user, 'I want to see an Israeli drama series');
 const moodOut = await mockProvider.generate(moodReq);
 assert.ok(!moodOut.includes('unrecognized prompt'), 'mock handles the mood prompt');
 assert.equal(moodOut, await mockProvider.generate(moodReq), 'mock extraction is deterministic');
-const moodRules = llm.parseMoodExtractionResponse(moodOut);
+const moodRules = rules.parseRulesJson(moodOut);
 assert.ok(Array.isArray(moodRules));
 assert.deepEqual(
-  llm.parseMoodExtractionResponse('{"rules": [{"dimension": "genre", "operator": "is", "value": 18, "mode": "hard"}]}'),
+  rules.parseRulesJson('{"rules": [{"dimension": "genre", "operator": "is", "value": 18, "mode": "hard"}]}'),
   [{ dimension: 'genre', operator: 'is', value: 18, mode: 'hard' }],
 );
-assert.deepEqual(llm.parseMoodExtractionResponse('```json\n{"rules": []}\n```'), []);
-assert.deepEqual(llm.parseMoodExtractionResponse('not json at all'), []);
-assert.deepEqual(llm.parseMoodExtractionResponse('{"rules": [{"dimension": "genre", "operator": "is", "value": 999}]}'), []);
+assert.deepEqual(rules.parseRulesJson('```json\n{"rules": []}\n```'), []);
+assert.deepEqual(rules.parseRulesJson('not json at all'), []);
+assert.deepEqual(rules.parseRulesJson('{"rules": [{"dimension": "genre", "operator": "is", "value": 999}]}'), []);
+
+// --- unified extraction: one RULES spec, one service, both paths ---
+// Both prompts embed the SAME fragment: the shared MODE line and the
+// shared vocabulary render in each (a synonym added to the vocabulary
+// reaches both extractions — the drift that caused the 'בלבד' gap).
+for (const [name, system] of [
+  ['consolidation', consolReq.system],
+  ['mood', moodReq.system],
+]) {
+  assert.ok(system.includes('MODE — hard ONLY'), `${name} prompt embeds the shared RULES fragment`);
+  assert.ok(system.includes('בלבד'), `${name} prompt renders the shared categorical list`);
+  assert.ok(system.includes('without'), `${name} prompt renders the shared categorical list`);
+  assert.ok(system.includes('10764=Reality'), `${name} prompt renders the shared genre list`);
+}
+// resolveRules = validate + ground in one step, for both paths.
+assert.deepEqual(
+  rules.resolveRules(
+    [
+      { dimension: 'genre', operator: 'isNot', value: 10764, mode: 'hard' },
+      { dimension: 'genre', operator: 'is', value: 999, mode: 'hard' },
+    ],
+    ['I never watch reality shows'],
+  ),
+  [{ dimension: 'genre', operator: 'isNot', value: 10764, mode: 'hard' }],
+);
+// Cross-path parity: the same statement through the mood path
+// (prompt + mock + service parser + grounding) yields the same rules
+// as the extractor directly — one service, both paths. This is the
+// dev equivalent of the 17 Nov live probe that exposed the gap.
+const probeText = 'דרמה ישראלית בלבד, בלי תוכניות ריאליטי';
+const probeReq = llm.buildMoodExtractionPrompt(probeText);
+const probeRules = rules.resolveRules(rules.parseRulesJson(await mockProvider.generate(probeReq)), [probeText]);
+assert.deepEqual(probeRules, mockLlm.extractMockRules([probeText]));
+assert.deepEqual(probeRules, [
+  { dimension: 'genre', operator: 'is', value: 18, mode: 'hard' },
+  { dimension: 'genre', operator: 'isNot', value: 10764, mode: 'hard' },
+  { dimension: 'country', operator: 'is', value: 'IL', mode: 'hard' },
+]);
 
 // --- mock embeddings: deterministic, normalized, hash-derived ---
 assert.equal(mockLlm.MOCK_EMBEDDING_DIM, 64);

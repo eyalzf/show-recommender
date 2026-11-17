@@ -1093,21 +1093,21 @@ export function softRuleScore(facts: ShowFacts, rules: PreferenceRule[]): number
 
 /** Cue words per genre (canonical name -> EN + HE stems). Shared with the mock extractor. */
 export const GENRE_GROUNDING_CUES: ReadonlyArray<{ name: string; words: string[] }> = [
-  { name: 'Action & Adventure', words: ['action', 'adventure', 'אקשן', 'הרפתקאות'] },
-  { name: 'Animation', words: ['animation', 'animated', 'אנימציה', 'מצויר'] },
-  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומדיה', 'קומי', 'סיטקום'] },
-  { name: 'Crime', words: ['crime', 'פשע'] },
-  { name: 'Documentary', words: ['documentary', 'documentaries', 'דוקו'] },
-  { name: 'Drama', words: ['drama', 'דרמה'] },
-  { name: 'Family', words: ['family', 'משפחה'] },
-  { name: 'Kids', words: ['kids', "children's", 'children', 'ילדים'] },
-  { name: 'Mystery', words: ['mystery', 'מסתורין'] },
-  { name: 'News', words: ['news', 'current affairs', 'current-affairs', 'חדשות', 'אקטואליה'] },
+  { name: 'Action & Adventure', words: ['action', 'adventure', 'אקשן', 'הרפתק', 'פעול'] },
+  { name: 'Animation', words: ['animation', 'animated', 'אנימצ', 'מצויר'] },
+  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומד', 'קומי', 'מצחיק', 'סיטקום'] },
+  { name: 'Crime', words: ['crime', 'פשע', 'פלילי', 'משטר'] },
+  { name: 'Documentary', words: ['documentary', 'documentaries', 'דוקו', 'תיעודי'] },
+  { name: 'Drama', words: ['drama', 'דרמ'] },
+  { name: 'Family', words: ['family', 'משפח'] },
+  { name: 'Kids', words: ['kids', "children's", 'children', 'ילד'] },
+  { name: 'Mystery', words: ['mystery', 'מסתור'] },
+  { name: 'News', words: ['news', 'current affairs', 'current-affairs', 'חדשות', 'אקטואל', 'יומי'] },
   { name: 'Reality', words: ['reality', 'ריאליטי', 'ריאלטי'] },
-  { name: 'Sci-Fi & Fantasy', words: ['sci-fi', 'science fiction', 'fantasy', 'מדע בדיוני', 'פנטזיה'] },
+  { name: 'Sci-Fi & Fantasy', words: ['sci-fi', 'science fiction', 'fantasy', 'מד״ב', 'מד"ב', 'בדיוני', 'פנטזיה'] },
   { name: 'Soap', words: ['soap', 'טלנובלה', 'סבון'] },
-  { name: 'Talk', words: ['talk show', 'talkshow', 'אירוח'] },
-  { name: 'War & Politics', words: ['war shows', 'politics', 'מלחמה', 'פוליטיקה'] },
+  { name: 'Talk', words: ['talk show', 'talkshow', 'אירוח', 'טוק שואו', 'ראיון', 'יומי'] },
+  { name: 'War & Politics', words: ['war shows', 'politics', 'מלחמ', 'פוליט'] },
   { name: 'Western', words: ['western', 'מערבון'] },
 ];
 
@@ -1122,6 +1122,30 @@ export const COUNTRY_GROUNDING_CUES: ReadonlyArray<{ code: string; words: string
   { code: 'DE', words: ['german', 'גרמני'] },
   { code: 'JP', words: ['japanese', 'יפני'] },
   { code: 'TR', words: ['turkish', 'טורקי'] },
+  { code: 'IT', words: ['italian', 'איטלקי'] },
+  { code: 'SE', words: ['swedish', 'שוודי'] },
+  { code: 'NO', words: ['norwegian', 'נורווגי'] },
+  { code: 'DK', words: ['danish', 'דני'] },
+  { code: 'NL', words: ['dutch', 'הולנדי'] },
+  { code: 'AU', words: ['australian', 'אוסטרלי'] },
+  { code: 'CA', words: ['canadian', 'קנדי'] },
+  { code: 'IN', words: ['indian', 'הודי'] },
+  { code: 'CN', words: ['chinese', 'סיני'] },
+  { code: 'BR', words: ['brazilian', 'ברזילאי'] },
+  { code: 'MX', words: ['mexican', 'מקסיקני'] },
+  { code: 'AR', words: ['argentine', 'argentinian', 'ארגנטינאי'] },
+  { code: 'RU', words: ['russian', 'רוסי'] },
+  { code: 'UA', words: ['ukrainian', 'אוקראיני'] },
+  { code: 'PL', words: ['polish', 'פולני'] },
+  { code: 'GR', words: ['greek', 'יווני'] },
+  { code: 'PT', words: ['portuguese', 'פורטוגלי'] },
+  { code: 'BE', words: ['belgian', 'בלגי'] },
+  { code: 'CH', words: ['swiss', 'שווייצרי'] },
+  { code: 'AT', words: ['austrian', 'אוסטרי'] },
+  { code: 'IE', words: ['irish', 'אירי'] },
+  { code: 'NZ', words: ['new zealand', 'ניו זילנדי'] },
+  { code: 'EG', words: ['egyptian', 'מצרי'] },
+  { code: 'TH', words: ['thai', 'תאילנדי'] },
 ];
 
 /** Cue words per TMDB status value. */
@@ -1129,27 +1153,56 @@ export const STATUS_GROUNDING_CUES: Record<string, string[]> = {
   'Returning Series': ['returning', 'ongoing', 'still running', 'ממשיכ', 'עדיין רצ'],
   Planned: ['planned', 'מתוכננ'],
   'In Production': ['in production', 'being made', 'בהפקה'],
-  Ended: ['ended', 'finished', 'completed', 'הסתיימ', 'גמור', 'סיימ'],
+  Ended: ['ended', 'finished', 'completed', 'הסתיימ', 'גמור', 'סיימ', 'נגמר'],
   Canceled: ['canceled', 'cancelled', 'בוטל'],
   Pilot: ['pilot', 'פיילוט'],
 };
 
 /**
- * Categorical wording markers for the hard-mode check. A superset
- * of the mock extractor's markers (which deliberately excludes the
- * quantity words 'nothing'/'none' — "nothing but comedies" is an
- * inclusion, and the mock's year regexes handle those phrasings
- * directly). Grounding has no such trap: it only asks whether a
- * grounding statement rejects categorically.
+ * Rule-extraction vocabulary — the SINGLE source of truth for the
+ * wording that decides rule mode. Three consumers, zero copies:
+ *  - the RULES prompt fragment (llm.ts) interpolates the EN/HE lists
+ *    into the MODE / soft / mild guidance, so prompt text cannot
+ *    drift from code;
+ *  - groundRules (below) uses the flat lists to preserve hard rules;
+ *  - the mock extractor (mockLlm.ts) imports the same lists.
+ * Add a synonym HERE and all three paths learn it at once. The flat
+ * lists are derived; never edit them directly.
  */
-export const CATEGORICAL_MARKERS: ReadonlyArray<string> = [
-  'never', "don't like", 'dont like', 'hate', "can't stand", 'cant stand',
+export const CATEGORICAL_MARKERS_EN: ReadonlyArray<string> = [
+  'never', "don't like", 'dont like', 'do not like', 'hate', "can't stand", 'cant stand', 'cannot stand',
   'avoid', 'no ', 'not a fan', 'dislike', 'must', 'only',
-  'nothing', 'none',
-  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק', 'בלבד', 'בלי',
-  'שום דבר', 'כלום',
-  'without',
+  'nothing', 'none', 'without', 'sick of', 'fed up with',
 ];
+export const CATEGORICAL_MARKERS_HE: ReadonlyArray<string> = [
+  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק', 'בלבד', 'בלי',
+  'שום דבר', 'כלום', 'ללא', 'אף פעם', 'לא מסוגל', 'לא מסוגלת', 'בשום אופן', 'נמאס',
+];
+export const CATEGORICAL_MARKERS: ReadonlyArray<string> = [
+  ...CATEGORICAL_MARKERS_EN,
+  ...CATEGORICAL_MARKERS_HE,
+];
+
+/** Mild / negated-preference wording: always a SOFT rule with the negated operator, never hard. */
+export const MILD_MARKERS_EN: ReadonlyArray<string> = [
+  'prefer less', 'prefers not', 'prefer no', 'not usually',
+  'rather not', 'would rather not', 'not really into', 'not a big fan', 'not keen on',
+];
+export const MILD_MARKERS_HE: ReadonlyArray<string> = [
+  'מעדיף פחות', 'מעדיפה פחות', 'מעדיף לא', 'מעדיפה לא',
+  'מעדיף שלא', 'מעדיפה שלא', 'עדיף שלא', 'לא מת על', 'לא משתגע על', 'לא כל כך', 'לא במיוחד',
+];
+export const MILD_MARKERS: ReadonlyArray<string> = [...MILD_MARKERS_EN, ...MILD_MARKERS_HE];
+
+/** Liking / wanting wording: a SOFT rule with the positive operator. */
+export const LIKING_MARKERS_EN: ReadonlyArray<string> = [
+  'prefer', 'love', 'like', 'more of', 'lean toward', 'want', 'in the mood for', 'enjoy', 'great', 'craving',
+];
+export const LIKING_MARKERS_HE: ReadonlyArray<string> = [
+  'מעדיף', 'מעדיפה', 'אוהב', 'אוהבת', 'רוצה', 'בא לי', 'נהדר',
+  'מחבב', 'מחבבת', 'נהנה', 'נהנית', 'מת על', 'משתגע על',
+];
+export const LIKING_MARKERS: ReadonlyArray<string> = [...LIKING_MARKERS_EN, ...LIKING_MARKERS_HE];
 
 function groundsRule(loweredText: string, rule: PreferenceRule): boolean {
   switch (rule.dimension) {

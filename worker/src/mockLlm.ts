@@ -1,7 +1,10 @@
 import type { LlmProvider, LlmRequest } from './llm';
 import {
+  CATEGORICAL_MARKERS,
   COUNTRY_GROUNDING_CUES,
   GENRE_GROUNDING_CUES,
+  LIKING_MARKERS,
+  MILD_MARKERS,
   TMDB_TV_GENRES,
   validateRules,
   type PreferenceRule,
@@ -127,31 +130,16 @@ export function routeNote(text: string): 'shared' | 'casual' | 'deep' {
 // count — a rating of one show is not a category statement). Values
 // resolve through the FIXED lists, so the mock can never emit a
 // value the server would reject — and the server validates anyway.
-// Deliberately narrow: vague wording and unmappable categories
-// ("horror", "musical") produce no rule, exactly like production.
-const EXCLUSION_MARKERS = [
-  'never', "don't like", 'dont like', 'hate', "can't stand", 'cant stand',
-  'avoid', 'no ', 'not a fan', 'dislike', 'must', 'only',
-  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק',
-];
-
-const LIKE_MARKERS = [
-  'love', 'like', 'enjoy', 'prefer', 'more of', 'great',
-  'אוהב', 'אוהבת', 'מעדיף', 'מעדיפה', 'נהדר',
-];
-
-const NEGATED_PREFER_MARKERS = [
-  'prefer less', 'prefer no', 'not usually',
-  'מעדיף פחות', 'מעדיפה פחות',
-];
-
-// Genre/country cue words live in util.ts (GENRE_GROUNDING_CUES /
-// COUNTRY_GROUNDING_CUES) — the same vocabulary the grounding
-// backstop uses, so mock extraction and grounding can never drift
-// apart. EXCLUSION_MARKERS stays local: it deliberately excludes
-// the quantity words ('nothing', 'none', ...) that the grounding
-// markers include, because "nothing but comedies" is an inclusion
-// and the year regexes below handle those phrasings directly.
+// The mock shares the single rule-extraction vocabulary (util.ts):
+// marker lists AND cue tables are imported, never copied — mock
+// extraction, the prompts, and grounding cannot drift apart. The
+// ONE deliberate difference: EXCLUSION_MARKERS excludes the quantity
+// words 'nothing'/'none', because "nothing but comedies" is an
+// inclusion and the year regexes below handle those phrasings
+// directly.
+const EXCLUSION_MARKERS = CATEGORICAL_MARKERS.filter((m) => m !== 'nothing' && m !== 'none');
+const LIKE_MARKERS = LIKING_MARKERS;
+const NEGATED_PREFER_MARKERS = MILD_MARKERS;
 
 /** Extract preference rules from note statements. Exported for selftest. */
 export function extractMockRules(notes: string[]): PreferenceRule[] {
@@ -165,7 +153,7 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
   ) => draft.push({ dimension, operator, value, mode });
   for (const statement of notes) {
     const lower = statement.toLowerCase();
-    const has = (markers: string[]) => markers.some((m) => lower.includes(m.toLowerCase()));
+    const has = (markers: ReadonlyArray<string>) => markers.some((m) => lower.includes(m.toLowerCase()));
     const categorical = has(EXCLUSION_MARKERS);
     const negatedPrefer = has(NEGATED_PREFER_MARKERS);
     const liking = has(LIKE_MARKERS);
@@ -175,7 +163,8 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
     // EXCEPTION: an inclusion modal ("only", "must", "רק", "חייב")
     // right before the cue word means is/HARD ("only comedies"),
     // unless a negation sits between the modal and the cue
-    // ("must avoid comedies" stays an exclusion).
+    // ("must avoid comedies" stays an exclusion) — and a post-cue
+    // inclusion ("comedies only", "דרמה בלבד") means the same.
     const inclusionBefore = (idx: number) => {
       // The LAST inclusion modal before the cue decides: the segment
       // between it and the cue must be short and negation-free
@@ -190,6 +179,21 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
       const segment = before.slice(lastEnd);
       return segment.length <= 20 && !/\bnever\b|\bno\b|\bnot\b|avoid|dislike|hate|לא|בלי/.test(segment);
     };
+    const inclusionAfter = (idx: number) => {
+      // The cue is a substring match (stems), so skip to the end of
+      // the WORD containing the cue, then look for an inclusion modal
+      // in the same clause ("comedies only", "דרמה בלבד", "דרמה
+      // ישראלית בלבד" — the modal scopes over the whole phrase). A
+      // clause boundary before the modal breaks it ("comedies, only
+      // drama" says nothing inclusive about comedies — the "only"
+      // belongs to drama).
+      let end = idx;
+      while (end < lower.length && !/[\s,.;:!?]/.test(lower[end])) end++;
+      const tail = lower.slice(end, end + 24);
+      const boundary = tail.search(/[,.;:!?]/);
+      const segment = boundary === -1 ? tail : tail.slice(0, boundary);
+      return segment.includes('בלבד') || /\bonly\b/.test(segment);
+    };
     const genreMode: 'hard' | 'soft' | null = categorical
       ? 'hard'
       : negatedPrefer || liking
@@ -203,7 +207,7 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
         for (const w of cue.words) {
           const idx = lower.indexOf(w.toLowerCase());
           if (idx === -1) continue;
-          if (inclusionBefore(idx)) push('genre', 'is', id, 'hard');
+          if (inclusionBefore(idx) || inclusionAfter(idx)) push('genre', 'is', id, 'hard');
           else if (genreMode) push('genre', operator, id, genreMode);
           break;
         }
@@ -212,7 +216,7 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
         for (const w of cue.words) {
           const idx = lower.indexOf(w.toLowerCase());
           if (idx === -1) continue;
-          if (inclusionBefore(idx)) push('country', 'is', cue.code, 'hard');
+          if (inclusionBefore(idx) || inclusionAfter(idx)) push('country', 'is', cue.code, 'hard');
           else if (genreMode) push('country', operator, cue.code, genreMode);
           break;
         }

@@ -20,11 +20,9 @@ import {
 } from './tmdb';
 import {
   buildConsolidationPrompt,
-  buildMoodExtractionPrompt,
   getLlmProvider,
   getRankLlmProvider,
   isDevWorker,
-  parseMoodExtractionResponse,
   resolveLlmMode,
   type ConsolidationNote,
 } from './llm';
@@ -67,7 +65,6 @@ import { loadKnownNames, recomputePeopleScores } from './trust';
 import {
   combineTasteSections,
   detectLanguageConflict,
-  groundRules,
   parseConsolidationResponse,
   parseReservoirEntries,
   parseTasteSummary,
@@ -78,6 +75,7 @@ import {
   type PreferenceRule,
   type TasteSections,
 } from './util';
+import { extractMoodRules, resolveRules } from './rules';
 import {
   STUB_CASUAL,
   STUB_DEEP,
@@ -714,18 +712,12 @@ app.post('/api/moods', async (c: Ctx) => {
     );
   }
   await requireProfileAccess(c, profileId);
-  // Rules come from the mood text alone, grounded against it (a rule
-  // the text never names is dropped — the same backstop as
-  // consolidation). Extraction failure must not block creation: a
-  // mood with no rules still works through its prose text.
+  // Rules come from the mood text alone, via the single extraction
+  // service (parse + validate + ground; failure yields no rules and
+  // never blocks creation — a mood with no rules still works through
+  // its prose text).
   const provider = getLlmProvider(c.env);
-  let rules: PreferenceRule[] = [];
-  try {
-    const raw = await provider.generate(buildMoodExtractionPrompt(cleanText));
-    rules = groundRules(parseMoodExtractionResponse(raw), [cleanText]);
-  } catch {
-    rules = [];
-  }
+  const rules = await extractMoodRules(provider, cleanText);
   const mood = await createMood(c.env.DB!, profileId, cleanText, rules, 'user');
   return c.json({ mood: moodView(mood), provider: provider.name }, 201);
 });
@@ -952,12 +944,10 @@ async function consolidateFromLog(
     buildConsolidationPrompt(notes, uiLang, ctx.tasteSections, ctx.profile.languages),
   );
   const parsed = parseConsolidationResponse(raw);
-  // Grounding backstop: drop rules no NOTE names (the model has
-  // invented categories twice), and demote hard rules whose backing
-  // statements carry no categorical wording to soft. Rating lines
-  // never ground a rule — per-show feedback is not a category
-  // statement. Applies to every provider, mock included.
-  const rules = groundRules(
+  // Validate + ground via the single extraction service (notes only:
+  // rating lines never ground a rule — per-show feedback is not a
+  // category statement). Applies to every provider, mock included.
+  const rules = resolveRules(
     parsed.rules,
     notes.filter((n) => n.source === 'note').map((n) => n.text),
   );
@@ -1177,7 +1167,7 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
       buildConsolidationPrompt(notes, uiLang, parseTasteSummary(STUB_TASTE.summary), STUB_PROFILE.languages),
     );
     const parsed = parseConsolidationResponse(raw);
-    const rules = groundRules(
+    const rules = resolveRules(
       parsed.rules,
       notes.map((n) => n.text),
     );

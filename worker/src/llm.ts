@@ -1,6 +1,6 @@
 import type { Env } from './env';
 import { MockLlmProvider } from './mockLlm';
-import { formatSectionsForPrompt, TMDB_TV_GENRES, validateRules, type PreferenceRule, type TasteSections } from './util';
+import { CATEGORICAL_MARKERS_EN, CATEGORICAL_MARKERS_HE, formatSectionsForPrompt, LIKING_MARKERS_EN, LIKING_MARKERS_HE, MILD_MARKERS_EN, MILD_MARKERS_HE, TMDB_TV_GENRES, type PreferenceRule, type TasteSections } from './util';
 
 /**
  * LLM layer — one small interface, swappable providers.
@@ -195,6 +195,48 @@ export interface ConsolidationNote {
   createdAt: number;
 }
 
+function quoteMarkers(markers: ReadonlyArray<string>): string {
+  return markers.map((m) => `"${m.trim()}"`).join(', ');
+}
+
+/**
+ * The shared RULES spec: dimensions, MODE, and soft/mild wording.
+ * Embedded by BOTH rule-extraction prompts (taste consolidation +
+ * mood), with the marker lists interpolated from the single
+ * vocabulary in util.ts — the two prompts cannot drift apart, and a
+ * synonym added there reaches both extractions at once. Per-prompt
+ * framing, examples, NO RULE lists, and output shapes stay in the
+ * individual builders.
+ */
+function rulesSpecFragment(): string {
+  const genreList = TMDB_TV_GENRES.map((g) => `${g.id}=${g.name}`).join(', ');
+  return (
+    'Dimensions and their values: ' +
+    'genre — value is a genre id from this fixed list ONLY, operators is/isNot: ' +
+    genreList +
+    '. year — value is an integer year, operators gte/lte: "nothing before 2000" is year gte 2000; "only shows from the 90s" is TWO rules, year gte 1990 AND year lte 1999. ' +
+    'country — value is an ISO 3166-1 alpha-2 code (US, GB, IL, KR, ES, FR, DE, ...), operators is/isNot: "Israeli shows" is country is IL; "no American shows" is country isNot US. ' +
+    'status — value is EXACTLY one of: "Returning Series", "Planned", "In Production", "Ended", "Canceled", "Pilot", operators is/isNot: "only finished shows" is status is Ended; "no ongoing shows" is TWO rules, status isNot "Returning Series" AND status isNot "In Production". ' +
+    'seasons — value is an integer season count, operators gte/lte: "at least 3 seasons" is seasons gte 3; "no more than 2 seasons" is seasons lte 2. ' +
+    'episodeMinutes — value is an integer episode length in minutes, operators gte/lte: "episodes under 30 minutes" is episodeMinutes lte 30. ' +
+    'MODE — hard ONLY for categorical, category-level wording: ' +
+    quoteMarkers(CATEGORICAL_MARKERS_EN) +
+    ', and Hebrew equivalents (' +
+    quoteMarkers(CATEGORICAL_MARKERS_HE) +
+    '). ' +
+    'Everything else rule-shaped is soft: ' +
+    quoteMarkers(LIKING_MARKERS_EN) +
+    ', and Hebrew equivalents (' +
+    quoteMarkers(LIKING_MARKERS_HE) +
+    '). ' +
+    'Mild or comparative wording (' +
+    quoteMarkers(MILD_MARKERS_EN) +
+    ', ' +
+    quoteMarkers(MILD_MARKERS_HE) +
+    ') becomes a SOFT rule with the negated operator, never hard. '
+  );
+}
+
 /**
  * Build the taste-consolidation prompt from the RAW feedback log only.
  * Input is user-authored text; no TMDB content ever enters this prompt.
@@ -232,7 +274,6 @@ export function buildConsolidationPrompt(
     .map((n) => `- [${n.source === 'note' ? 'note' : `rating:${n.kind}`}] ${n.text}`)
     .join('\n');
   const existingText = existing ? formatSectionsForPrompt(existing) : '';
-  const genreList = TMDB_TV_GENRES.map((g) => `${g.id}=${g.name}`).join(', ');
   return {
     system:
       'You consolidate a household TV profile\'s taste notes into a taste description in THREE sections: ' +
@@ -255,18 +296,8 @@ export function buildConsolidationPrompt(
       'A Casual statement and a Deep-focus statement that look opposed (e.g. "nothing slow" for casual vs "love a slow burn" for deep focus) are NOT a contradiction — they coexist in different sections, never flag them. ' +
       'Each contradiction carries its scope, and the proposed merge must honor both sides within that scope. ' +
       'RULES — from every statement that names a concrete, checkable constraint, extract one rule per constraint: {"dimension", "operator", "value", "mode"}. ' +
-      'Dimensions and their values: ' +
-      'genre — value is a genre id from this fixed list ONLY, operators is/isNot: ' +
-      genreList +
-      '. year — value is an integer year, operators gte/lte: "nothing before 2000" is year gte 2000; "only shows from the 90s" is TWO rules, year gte 1990 AND year lte 1999. ' +
-      'country — value is an ISO 3166-1 alpha-2 code (US, GB, IL, KR, ES, FR, DE, ...), operators is/isNot: "no American shows" is country isNot US. ' +
-      'status — value is EXACTLY one of: "Returning Series", "Planned", "In Production", "Ended", "Canceled", "Pilot", operators is/isNot: "only finished shows" is status is Ended; "no ongoing shows" is TWO rules, status isNot "Returning Series" AND status isNot "In Production". ' +
-      'seasons — value is an integer season count, operators gte/lte: "at least 3 seasons" is seasons gte 3; "no more than 2 seasons" is seasons lte 2. ' +
-      'episodeMinutes — value is an integer episode length in minutes, operators gte/lte: "episodes under 30 minutes" is episodeMinutes lte 30. ' +
+      rulesSpecFragment() +
       'One statement may yield several rules ("short comedies from the 90s" yields three). ' +
-      'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק"). ' +
-      'Everything else rule-shaped is soft: "prefer", "love", "like", "more of", "lean toward", "מעדיף/ה", "אוהב/ת". ' +
-      'Mild or comparative wording ("prefer less", "prefers not", "not usually", "מעדיף פחות", "מעדיף לא") becomes a SOFT rule with the negated operator, never hard. ' +
       'RULES COVER ONLY WHAT THE NOTES NAME: emit a rule only for a category, dimension, or value EXPLICITLY named in the notes. ' +
       'Never infer a related category — current-affairs shows do not imply talk shows, daily shows do not imply news, and a rejection of one genre never extends to another. If the notes reject X, the rule covers X only. ' +
       'NO RULE when: the statement names no concrete dimension or value (vague: "character-driven", "well-written", "good shows"); it rejects a SPECIFIC show (per-show feedback handles that); it is about LANGUAGE (the profile language filter owns language — keep it in the prose summary only); or it names a category with no fixed value (horror, musical, thriller-as-genre have no genre id — prose only, NEVER invent an id). ' +
@@ -429,11 +460,10 @@ export function buildRemovalCheckPrompt(
  * (e.g. "I want to see an Israeli drama series"); extraction runs ONLY
  * on that statement — the fixed profile rules are already stored and
  * are merged deterministically at generation time (see
- * util.effectiveRules). The dimension/operator/mode spec mirrors the
- * consolidation prompt's RULES section; validateRules + groundRules
- * enforce the contract on the output either way, so this prompt stays
- * a condensed copy rather than a shared builder (the consolidation
- * prompt's wording is load-bearing for the mock and the benchmark).
+ * util.effectiveRules). The RULES spec is the shared fragment
+ * (rulesSpecFragment) also embedded by the consolidation prompt, so
+ * the two extractions cannot drift apart; the rule-extraction service
+ * (rules.ts) owns parsing, validation, and grounding.
  *
  * The caller grounds the result against the mood text (a rule the
  * text never names is dropped) and stores the validated rules on the
@@ -441,24 +471,13 @@ export function buildRemovalCheckPrompt(
  * through its prose text alone (see generateLists' mood suffix).
  */
 export function buildMoodExtractionPrompt(moodText: string): LlmRequest {
-  const genreList = TMDB_TV_GENRES.map((g) => `${g.id}=${g.name}`).join(', ');
   return {
     system:
       'MOOD RULE EXTRACTION — extract preference rules from ONE mood statement: ' +
       'a single sentence saying what the user wants to watch right now. ' +
       'From every constraint the statement names, extract one rule per constraint: {"dimension", "operator", "value", "mode"}. ' +
-      'Dimensions and their values: ' +
-      'genre — value is a genre id from this fixed list ONLY, operators is/isNot: ' +
-      genreList +
-      '. year — value is an integer year, operators gte/lte: "nothing before 2000" is year gte 2000; "only shows from the 90s" is TWO rules, year gte 1990 AND year lte 1999. ' +
-      'country — value is an ISO 3166-1 alpha-2 code (US, GB, IL, KR, ES, FR, DE, ...), operators is/isNot: "Israeli shows" is country is IL. ' +
-      'status — value is EXACTLY one of: "Returning Series", "Planned", "In Production", "Ended", "Canceled", "Pilot", operators is/isNot: "only finished shows" is status is Ended. ' +
-      'seasons — value is an integer season count, operators gte/lte: "at least 3 seasons" is seasons gte 3. ' +
-      'episodeMinutes — value is an integer episode length in minutes, operators gte/lte: "episodes under 30 minutes" is episodeMinutes lte 30. ' +
+      rulesSpecFragment() +
       'One statement may yield several rules ("short Israeli comedies" yields three). ' +
-      'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "without", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק", "בלבד"). ' +
-      'Everything else rule-shaped is soft: "prefer", "love", "like", "want", "in the mood for", "מעדיף/ה", "אוהב/ת", "רוצה", "בא לי". ' +
-      'Mild or comparative wording ("prefer less", "prefers not", "מעדיף פחות", "מעדיף לא") becomes a SOFT rule with the negated operator, never hard. ' +
       'RULES COVER ONLY WHAT THE STATEMENT NAMES: emit a rule only for a category, dimension, or value EXPLICITLY named. ' +
       'Never infer a related category — a rejection of one genre never extends to another. ' +
       'NO RULE when: the statement names no concrete dimension or value (vague: "something light", "character-driven", "good shows"); it rejects a SPECIFIC show; it is about LANGUAGE (the profile language filter owns language); or it names a category with no fixed value (horror, musical, thriller-as-genre have no genre id — NEVER invent an id). ' +
@@ -470,15 +489,3 @@ export function buildMoodExtractionPrompt(moodText: string): LlmRequest {
   };
 }
 
-/** Parse a mood-extraction response. Tolerant: anything unparseable reads as no rules. */
-export function parseMoodExtractionResponse(text: string): PreferenceRule[] {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end <= start) return [];
-  try {
-    const parsed = JSON.parse(text.slice(start, end + 1)) as { rules?: unknown };
-    return validateRules(parsed.rules);
-  } catch {
-    return [];
-  }
-}
