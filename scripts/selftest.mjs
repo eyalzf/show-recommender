@@ -462,6 +462,19 @@ assert.deepEqual(
   util.groundRules([R('year', 'gte', 2011, 'soft')], ['I prefer shows after 2010']),
   [R('year', 'gte', 2011, 'soft')], // +/-1 boundary derivation still grounds
 );
+
+// --- groundRules: 'בלבד' / 'בלי' / 'without' are categorical (mood probe 17 Nov) ---
+assert.deepEqual(
+  util.groundRules(
+    [R('genre', 'is', 18, 'hard'), R('country', 'is', 'IL', 'hard'), R('genre', 'isNot', 10764, 'hard')],
+    ['דרמה ישראלית בלבד, בלי תוכניות ריאליטי'],
+  ),
+  [R('genre', 'is', 18, 'hard'), R('country', 'is', 'IL', 'hard'), R('genre', 'isNot', 10764, 'hard')],
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ['Dramas without reality shows']),
+  [R('genre', 'isNot', 10764, 'hard')],
+);
 assert.deepEqual(
   util.groundRules([R('year', 'lte', 1999, 'hard')], ['Only shows before 2000']),
   [R('year', 'lte', 1999, 'hard')],

@@ -456,7 +456,7 @@ export function buildMoodExtractionPrompt(moodText: string): LlmRequest {
       'seasons — value is an integer season count, operators gte/lte: "at least 3 seasons" is seasons gte 3. ' +
       'episodeMinutes — value is an integer episode length in minutes, operators gte/lte: "episodes under 30 minutes" is episodeMinutes lte 30. ' +
       'One statement may yield several rules ("short Israeli comedies" yields three). ' +
-      'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק"). ' +
+      'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "without", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק", "בלבד"). ' +
       'Everything else rule-shaped is soft: "prefer", "love", "like", "want", "in the mood for", "מעדיף/ה", "אוהב/ת", "רוצה", "בא לי". ' +
       'Mild or comparative wording ("prefer less", "prefers not", "מעדיף פחות", "מעדיף לא") becomes a SOFT rule with the negated operator, never hard. ' +
       'RULES COVER ONLY WHAT THE STATEMENT NAMES: emit a rule only for a category, dimension, or value EXPLICITLY named. ' +

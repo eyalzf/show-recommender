@@ -1146,8 +1146,9 @@ export const CATEGORICAL_MARKERS: ReadonlyArray<string> = [
   'never', "don't like", 'dont like', 'hate', "can't stand", 'cant stand',
   'avoid', 'no ', 'not a fan', 'dislike', 'must', 'only',
   'nothing', 'none',
-  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק',
+  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק', 'בלבד', 'בלי',
   'שום דבר', 'כלום',
+  'without',
 ];
 
 function groundsRule(loweredText: string, rule: PreferenceRule): boolean {
