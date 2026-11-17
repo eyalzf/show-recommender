@@ -274,6 +274,16 @@ const MAX_LIKED_META = 6;
 const MAX_NEGATIVE_META = 5;
 /** Shortlist size for the final LLM removal-only check: Top 10 + promotion headroom. */
 const REMOVAL_CHECK_SIZE = 15;
+/**
+ * Hard cap on removals per kind per generation. The check is the
+ * third of three negative layers (retrieval exclusion and demotion
+ * already ran); its realistic yield is 0–2 shows. Without a cap, one
+ * bad 8B output over a long check set can wipe a whole reservoir —
+ * on 2026-11-17 the full-reservoir check removed all 43 casual
+ * entries in one generation. The cap bounds that failure mode to a
+ * small loss while preserving every realistic use.
+ */
+const MAX_REMOVAL_CHECK_REMOVALS = 5;
 
 function toCandidate(r: TmdbSearchResult, genreMap: Map<number, string>): Candidate {
   return {
@@ -841,11 +851,17 @@ async function rankKind(
 
 /**
  * Final negative layer (c): an LLM removal-only check over the
- * shortlist head (Top 10 + promotion headroom, so promoted items were
- * checked too). Returns the ids to remove — validated against the
- * checked set, so the check can only remove. Fails open (no removals)
- * when there are no negatives, the call fails, or nothing parses: the
- * retrieval and demotion layers still apply.
+ * ranked order (greedy order + cap-deferred remainder). Returns the
+ * ids to remove — validated against the checked set, so the check
+ * can only remove, and capped (see MAX_REMOVAL_CHECK_REMOVALS) so a
+ * bad model output cannot gut a list. Fails open (no removals) when
+ * there are no negatives, the call fails, or nothing parses: the
+ * retrieval and demotion layers still apply. The reservoir TAIL is
+ * deliberately not checked here: tail shows passed the retrieval
+ * exclusion and demotion layers at this same regeneration, and they
+ * get this check when they enter the ranked order — checking the
+ * tail too tripled the prompt and let one bad output wipe a whole
+ * reservoir (2026-11-17).
  */
 async function removalCheck(
   c: Context<{ Bindings: Env }>,
@@ -877,7 +893,7 @@ async function removalCheck(
         uiLang,
       ),
     );
-    return new Set(parseRemovalCheckResponse(text, validIds));
+    return new Set(parseRemovalCheckResponse(text, validIds).slice(0, MAX_REMOVAL_CHECK_REMOVALS));
   } catch (err) {
     console.error('removal check failed', err);
     return new Set();
@@ -1049,8 +1065,9 @@ function emptyList(shortReason: string | null): GeneratedList {
  * the LLM listwise-ranks a 30-show working set per kind exactly as
  * before, and the reservoir keeps the greedy order + cap-deferred
  * remainder + deterministic tail, capped at 50. The removal check
- * covers the whole reservoir, so every stored show is vetted before
- * it can promote into view.
+ * covers the ranked order (capped per generation), so it can never
+ * wipe the reservoir; tail shows are vetted by the retrieval and
+ * demotion layers and get the removal check when ranked.
  */
 export async function generateLists(
   c: Context<{ Bindings: Env }>,
@@ -1338,18 +1355,19 @@ export async function generateLists(
   const casualAssembled = assemble(casualGreedy, casualTail, casualCands);
   const deepAssembled = assemble(deepGreedy, deepTail, deepCands);
 
-  // Final negative layer (c): removal-only LLM check over the WHOLE
-  // reservoir order, so every stored show is vetted before it can
-  // promote into view. Removals cannot violate the caps (removal
-  // only shrinks clusters). Display backfills from the ranked order
-  // after removals — the tail never displays directly.
-  const casualById = new Map([...casualCands, ...casualTail].map((cand) => [cand.tmdbId, cand]));
-  const deepById = new Map([...deepCands, ...deepTail].map((cand) => [cand.tmdbId, cand]));
-  const toRanked = (res: ReservoirEntry[]): RankedEntry[] =>
-    res.map((e) => ({ tmdbId: e.tmdbId, rationale: e.rationale, risk: e.risk }));
+  // Final negative layer (c): removal-only LLM check over the RANKED
+  // order only (greedy order + cap-deferred remainder) — never the
+  // tail, and capped per generation (see removalCheck). Removals
+  // cannot violate the caps (removal only shrinks clusters).
+  // Display backfills from the ranked order after removals — the
+  // tail never displays directly.
+  const casualById = new Map(casualCands.map((cand) => [cand.tmdbId, cand]));
+  const deepById = new Map(deepCands.map((cand) => [cand.tmdbId, cand]));
+  const casualRankedOrder = [...casualAssembled.ordered, ...casualAssembled.deferred];
+  const deepRankedOrder = [...deepAssembled.ordered, ...deepAssembled.deferred];
   const [casualRemoved, deepRemoved] = await Promise.all([
-    removalCheck(c, toRanked(casualAssembled.reservoir), casualById, exclusionMeta, uiLang, RESERVOIR_SIZE),
-    removalCheck(c, toRanked(deepAssembled.reservoir), deepById, exclusionMeta, uiLang, RESERVOIR_SIZE),
+    removalCheck(c, casualRankedOrder, casualById, exclusionMeta, uiLang, casualRankedOrder.length),
+    removalCheck(c, deepRankedOrder, deepById, exclusionMeta, uiLang, deepRankedOrder.length),
   ]);
   const casualReservoir = casualAssembled.reservoir.filter((e) => !casualRemoved.has(e.tmdbId));
   const deepReservoir = deepAssembled.reservoir.filter((e) => !deepRemoved.has(e.tmdbId));
