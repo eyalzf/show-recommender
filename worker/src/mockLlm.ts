@@ -369,20 +369,6 @@ function mockRank(systemText: string, userText: string): string {
   return JSON.stringify({ ranked, shortReason: null });
 }
 
-/**
- * Mock ad-hoc rationale: one deterministic sentence from the show line
- * in the prompt (title/year/genres only — never invented detail).
- */
-function mockAdhoc(userText: string): string {
-  const showMatch = /^Show:\s*(.+?)\s*\(([^)]*)\)\s*\[([^\]]*)\]/m.exec(userText);
-  if (!showMatch) return 'Mock: a fitting pick for the request.';
-  const title = showMatch[1].trim();
-  const year = showMatch[2].trim();
-  const genres = showMatch[3].trim();
-  const firstGenre = genres && genres !== 'no genre' ? genres.split(',')[0].trim() : '';
-  return `Mock: ${title}${year ? ` (${year})` : ''} fits the request${firstGenre ? ` as ${firstGenre}` : ''}.`;
-}
-
 /** The deterministic mock provider. One instance is stateless and shared. */
 export class MockLlmProvider implements LlmProvider {
   readonly name = 'mock';
@@ -396,7 +382,9 @@ export class MockLlmProvider implements LlmProvider {
     if (system.includes('Return ONLY the ids of shortlisted shows')) {
       return JSON.stringify({ removeIds: [] });
     }
-    if (system.includes('one-sentence rationale')) return mockAdhoc(req.user);
+    if (system.includes('MOOD RULE EXTRACTION')) {
+      return JSON.stringify({ rules: extractMockRules([req.user]) });
+    }
     return '[mock] unrecognized prompt — no mock behavior defined for this request.';
   }
 }

@@ -783,6 +783,83 @@ export function validateRules(raw: unknown): PreferenceRule[] {
 }
 
 /**
+ * Merge fixed profile rules with a Mood's rules into the EFFECTIVE
+ * rule set used for generation. Override is DIMENSION-level: a mood
+ * rule on a dimension suppresses every fixed rule on that same
+ * dimension, so the mood owns the dimension while active and
+ * contradictory bounds (e.g. fixed "seasons >= 3" soft + mood
+ * "seasons <= 2" hard) can never intersect to empty. The fixed
+ * rules are never modified — the merge is computed on read/generate
+ * and the mood's stored rules are untouched. Order: surviving fixed
+ * rules first (their stored order), then mood rules.
+ */
+export function effectiveRules(
+  fixed: PreferenceRule[],
+  overlay: PreferenceRule[],
+): PreferenceRule[] {
+  if (overlay.length === 0) return [...fixed];
+  const owned = new Set(overlay.map((r) => r.dimension));
+  return [...fixed.filter((r) => !owned.has(r.dimension)), ...overlay];
+}
+
+/** Parse a mood row's stored rules_json. Never throws; bad JSON reads as no rules. */
+export function parseMoodRulesJson(json: string | null | undefined): PreferenceRule[] {
+  if (!json) return [];
+  try {
+    return validateRules(JSON.parse(json) as unknown);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Preset moods, seeded for every profile (migration 0004 for
+ * existing profiles, the profile-creation route for new ones).
+ * Texts are bilingual; rules are hand-curated — no LLM extraction
+ * runs at seed time. The migration embeds the same texts/rules as
+ * SQL literals; keep the two in sync when editing.
+ */
+export interface PresetMoodDef {
+  key: string;
+  textEn: string;
+  textHe: string;
+  rules: PreferenceRule[];
+}
+
+export const PRESET_MOODS: PresetMoodDef[] = [
+  {
+    key: 'israeli-drama',
+    textEn: 'Israeli drama',
+    textHe: 'דרמה ישראלית',
+    rules: [
+      { dimension: 'country', operator: 'is', value: 'IL', mode: 'hard' },
+      { dimension: 'genre', operator: 'is', value: 18, mode: 'hard' },
+    ],
+  },
+  {
+    key: 'something-light',
+    textEn: 'Something light',
+    textHe: 'משהו קליל',
+    rules: [
+      { dimension: 'genre', operator: 'is', value: 35, mode: 'soft' },
+      { dimension: 'episodeMinutes', operator: 'lte', value: 30, mode: 'soft' },
+    ],
+  },
+  {
+    key: 'with-kids',
+    textEn: 'With the kids',
+    textHe: 'עם הילדים',
+    rules: [{ dimension: 'genre', operator: 'is', value: 10751, mode: 'soft' }],
+  },
+  {
+    key: 'weekend-binge',
+    textEn: 'Weekend binge',
+    textHe: 'מרתון סופ״ש',
+    rules: [{ dimension: 'seasons', operator: 'gte', value: 3, mode: 'soft' }],
+  },
+];
+
+/**
  * Migrate the superseded hardExcludes shape (shipped 2026-11-17
  * morning, replaced by rules the same day) into equivalent hard
  * rules: excluded genres -> isNot/hard, year bounds -> gte/lte/hard.

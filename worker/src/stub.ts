@@ -16,6 +16,7 @@ export const STUB_PROFILE = {
   iconRef: null as string | null,
   languages: ['he', 'en', 'es'],
   uiLanguage: 'en',
+  activeMoodId: null as string | null,
   noteCount: 3,
   listsUpdatedAt: null as string | null,
 };

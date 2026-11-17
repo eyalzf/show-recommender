@@ -1,6 +1,6 @@
 import type { Env } from './env';
 import { MockLlmProvider } from './mockLlm';
-import { formatSectionsForPrompt, TMDB_TV_GENRES, type TasteSections } from './util';
+import { formatSectionsForPrompt, TMDB_TV_GENRES, validateRules, type PreferenceRule, type TasteSections } from './util';
 
 /**
  * LLM layer — one small interface, swappable providers.
@@ -424,20 +424,61 @@ export function buildRemovalCheckPrompt(
 }
 
 /** One-sentence rationale for an ad-hoc pick: query + factual labels only. */
-export function buildAdhocRationalePrompt(
-  query: string,
-  pick: RankCandidateInput,
-  uiLang: string,
-): LlmRequest {
+/**
+ * Build the Mood rule-extraction prompt. A Mood carries ONE statement
+ * (e.g. "I want to see an Israeli drama series"); extraction runs ONLY
+ * on that statement — the fixed profile rules are already stored and
+ * are merged deterministically at generation time (see
+ * util.effectiveRules). The dimension/operator/mode spec mirrors the
+ * consolidation prompt's RULES section; validateRules + groundRules
+ * enforce the contract on the output either way, so this prompt stays
+ * a condensed copy rather than a shared builder (the consolidation
+ * prompt's wording is load-bearing for the mock and the benchmark).
+ *
+ * The caller grounds the result against the mood text (a rule the
+ * text never names is dropped) and stores the validated rules on the
+ * mood row. Zero rules is a valid outcome — the mood then acts
+ * through its prose text alone (see generateLists' mood suffix).
+ */
+export function buildMoodExtractionPrompt(moodText: string): LlmRequest {
+  const genreList = TMDB_TV_GENRES.map((g) => `${g.id}=${g.name}`).join(', ');
   return {
     system:
-      'You write a one-sentence rationale for a TV recommendation. Use ONLY the ' +
-      'user request and the show title, year, and genres given. Write in ' +
-      (uiLang === 'he' ? 'Hebrew' : 'English') +
-      '. Do not invent plot details.',
-    user:
-      `Request: "${query}"\n` +
-      `Show: ${pick.title} (${pick.year}) [${pick.genres.join(', ') || 'no genre'}]`,
-    maxTokens: 200,
+      'MOOD RULE EXTRACTION — extract preference rules from ONE mood statement: ' +
+      'a single sentence saying what the user wants to watch right now. ' +
+      'From every constraint the statement names, extract one rule per constraint: {"dimension", "operator", "value", "mode"}. ' +
+      'Dimensions and their values: ' +
+      'genre — value is a genre id from this fixed list ONLY, operators is/isNot: ' +
+      genreList +
+      '. year — value is an integer year, operators gte/lte: "nothing before 2000" is year gte 2000; "only shows from the 90s" is TWO rules, year gte 1990 AND year lte 1999. ' +
+      'country — value is an ISO 3166-1 alpha-2 code (US, GB, IL, KR, ES, FR, DE, ...), operators is/isNot: "Israeli shows" is country is IL. ' +
+      'status — value is EXACTLY one of: "Returning Series", "Planned", "In Production", "Ended", "Canceled", "Pilot", operators is/isNot: "only finished shows" is status is Ended. ' +
+      'seasons — value is an integer season count, operators gte/lte: "at least 3 seasons" is seasons gte 3. ' +
+      'episodeMinutes — value is an integer episode length in minutes, operators gte/lte: "episodes under 30 minutes" is episodeMinutes lte 30. ' +
+      'One statement may yield several rules ("short Israeli comedies" yields three). ' +
+      'MODE — hard ONLY for categorical, category-level wording: "never", "no", "only", "must", "hate", "can\'t stand", "don\'t like", "avoid", and Hebrew equivalents ("לעולם לא", "לא אוהב/ת", "שונא/ת", "לא סובל/ת", "בלי", "רק"). ' +
+      'Everything else rule-shaped is soft: "prefer", "love", "like", "want", "in the mood for", "מעדיף/ה", "אוהב/ת", "רוצה", "בא לי". ' +
+      'Mild or comparative wording ("prefer less", "prefers not", "מעדיף פחות", "מעדיף לא") becomes a SOFT rule with the negated operator, never hard. ' +
+      'RULES COVER ONLY WHAT THE STATEMENT NAMES: emit a rule only for a category, dimension, or value EXPLICITLY named. ' +
+      'Never infer a related category — a rejection of one genre never extends to another. ' +
+      'NO RULE when: the statement names no concrete dimension or value (vague: "something light", "character-driven", "good shows"); it rejects a SPECIFIC show; it is about LANGUAGE (the profile language filter owns language); or it names a category with no fixed value (horror, musical, thriller-as-genre have no genre id — NEVER invent an id). ' +
+      'WHEN IN DOUBT, omit the rule. An empty rules array is always safe; a wrong rule hides or mis-ranks shows the user would like. ' +
+      'Return ONLY a JSON object with this shape, no other text: {"rules": [{"dimension": "genre", "operator": "is", "value": 18, "mode": "hard"}]}. ' +
+      'rules is ALWAYS present; empty means [].',
+    user: moodText,
+    maxTokens: 300,
   };
+}
+
+/** Parse a mood-extraction response. Tolerant: anything unparseable reads as no rules. */
+export function parseMoodExtractionResponse(text: string): PreferenceRule[] {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1)) as { rules?: unknown };
+    return validateRules(parsed.rules);
+  } catch {
+    return [];
+  }
 }

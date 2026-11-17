@@ -8,7 +8,6 @@ import { Home } from './screens/Home';
 import { ShowDetail } from './screens/ShowDetail';
 import { TasteProfile } from './screens/TasteProfile';
 import { Recommendations } from './screens/Recommendations';
-import { AdHoc } from './screens/AdHoc';
 import { ShowPicker } from './components/ShowPicker';
 import { ProfileSwitcher } from './components/ProfileSwitcher';
 import { DevBar } from './components/DevBar';
@@ -90,7 +89,7 @@ export function App() {
     setDetailId(tmdbId);
     // The list item carries the rationale + classification chips, which
     // live in detail now that rail cards are compact. Opened from
-    // anywhere else (search, ad-hoc), there is no list context.
+    // anywhere else (search), there is no list context.
     setDetailItem(item ?? null);
     setScreen('detail');
   };
@@ -227,7 +226,7 @@ export function App() {
             lang={lang}
             profile={activeProfile}
             onOpenShow={openShow}
-            onAdhoc={() => setScreen('adhoc')}
+            onProfileChanged={handleProfileChanged}
           />
         ) : screen === 'detail' && detailId != null && activeProfile ? (
           <ShowDetail lang={lang} profile={activeProfile} tmdbId={detailId} listItem={detailItem} onBack={() => setScreen('home')} />
@@ -236,7 +235,13 @@ export function App() {
         ) : screen === 'recommendations' && activeProfile ? (
           <Recommendations lang={lang} profile={activeProfile} />
         ) : activeProfile ? (
-          <AdHoc lang={lang} profile={activeProfile} onOpenShow={openShow} />
+          <Home
+            key={homeKey}
+            lang={lang}
+            profile={activeProfile}
+            onOpenShow={openShow}
+            onProfileChanged={handleProfileChanged}
+          />
         ) : (
           <ProfilePicker
             lang={lang}

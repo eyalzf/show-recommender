@@ -15,7 +15,6 @@ import {
   type TmdbSearchResult,
 } from './tmdb';
 import {
-  buildAdhocRationalePrompt,
   buildRankPrompt,
   buildRemovalCheckPrompt,
   getRankLlmProvider,
@@ -46,6 +45,7 @@ import {
   clusterFor,
   combineTasteSections,
   cosine,
+  effectiveRules,
   EMPTY_DETAIL_FACTS,
   ensureLanguageMinimums,
   genreDiscoverPlans,
@@ -65,6 +65,7 @@ import {
   structureFor,
   tasteTextForKind,
   toneFor,
+  type PreferenceRule,
   type RankedEntry,
   type ReservoirEntry,
   type ShowDetailFacts,
@@ -999,8 +1000,13 @@ export async function refillSnapshot(
   pool: ReservoirEntry[],
   ctx: ProfileContext,
   uiLang: string,
+  overlay?: MoodOverlay,
 ): Promise<ListItemOut[]> {
   if (snapshot.length >= TOP_N) return snapshot;
+  // Mood lists refill under the effective rules, like generation.
+  if (overlay) {
+    ctx = { ...ctx, rules: effectiveRules(ctx.rules, overlay.rules) };
+  }
   const languages = ctx.profile.languages;
   const excluded = new Set<number>([...ctx.ratedIds, ...ctx.denyIds, ...ctx.excludedIds]);
   const present = new Set(snapshot.map((item) => item.tmdbId));
@@ -1048,6 +1054,19 @@ function emptyList(shortReason: string | null): GeneratedList {
 }
 
 /**
+ * A Mood overlay for one generation: the mood's own text plus its
+ * extracted rules. Generation merges the rules with the fixed
+ * profile rules (dimension-level override — see
+ * util.effectiveRules) and appends the text as a prose suffix on
+ * the taste text, so a prose-only mood (zero extracted rules) still
+ * shifts retrieval and ranking.
+ */
+export interface MoodOverlay {
+  text: string;
+  rules: PreferenceRule[];
+}
+
+/**
  * Generate both lists for a profile. Requires TMDB (throws
  * TmdbNotConfiguredError / TmdbApiError) and a non-empty feedback log;
  * with no feedback at all the lists stay empty with a reason, because
@@ -1068,14 +1087,32 @@ function emptyList(shortReason: string | null): GeneratedList {
  * covers the ranked order (capped per generation), so it can never
  * wipe the reservoir; tail shows are vetted by the retrieval and
  * demotion layers and get the removal check when ranked.
+ *
+ * With an `overlay`, the whole generation runs under the EFFECTIVE
+ * rules (mood rules override fixed rules per dimension) and the mood
+ * text rides along on the taste text. The caller's stored rows for
+ * the mood keep their own reservoirs — `prev` must be the mood's
+ * reservoirs, never the main list's.
  */
 export async function generateLists(
   c: Context<{ Bindings: Env }>,
   ctx: ProfileContext,
   uiLang: string,
   prev?: { casual: ReservoirEntry[]; deep: ReservoirEntry[] },
+  overlay?: MoodOverlay,
 ): Promise<GeneratedLists> {
   const now = Date.now();
+  // Mood overlay: swap in the effective rules for the whole
+  // generation — retrieval, prune, pool filter, and soft scoring all
+  // read ctx.rules, so one reassignment (on a shallow copy; the
+  // caller's context is untouched) covers every layer.
+  if (overlay) {
+    ctx = { ...ctx, rules: effectiveRules(ctx.rules, overlay.rules) };
+  }
+  const moodSuffix =
+    overlay && overlay.text.trim()
+      ? `\n\nCurrent mood (what the user wants right now — weigh it alongside the taste description above, never instead of the standing likes and dislikes):\n${overlay.text.trim()}`
+      : '';
   if (ctx.showFeedback.length === 0) {
     const reason =
       uiLang === 'he'
@@ -1126,7 +1163,7 @@ export async function generateLists(
   }
   const survivorIds = new Set<number>(carriedIds);
 
-  const tasteText = tasteTextForRanking(ctx);
+  const tasteText = tasteTextForRanking(ctx) + moodSuffix;
   const shortTermText = buildShortTermTasteText(ctx.feedback, now);
 
   // Liked-show metadata (cached details, newest first): genre overlap
@@ -1279,8 +1316,8 @@ export async function generateLists(
   }
 
   const [casualRank, deepRank] = await Promise.all([
-    rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'casual', now), uiLang),
-    rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'deep', now), uiLang),
+    rankKind(c, 'casual', casualCands, casualBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'casual', now) + moodSuffix, uiLang),
+    rankKind(c, 'deep', deepCands, deepBucket.strictIds, tasteTextForRankingWithRecency(ctx, 'deep', now) + moodSuffix, uiLang),
   ]);
 
   // Deterministic post-LLM pass (MMR + calibration + epsilon blend +
@@ -1429,120 +1466,3 @@ export async function generateLists(
   };
 }
 
-// ---------------------------------------------------------------- ad-hoc
-
-export interface AdhocPick {
-  tmdbId: number;
-  title: string;
-  originalLanguage: string;
-  firstAirDate: string;
-  posterPath: string | null;
-  genres: string[];
-  rationale: string;
-}
-
-/**
- * One fresh pick for a free-text request. Independent by design: reads
- * the profile's filters/exclusions but writes nothing to taste or
- * lists. The query is embedded against candidate title+genre text and
- * the best match gets an LLM-written rationale (query + factual labels
- * only).
- */
-export async function generateAdhocPick(
-  c: Context<{ Bindings: Env }>,
-  ctx: ProfileContext | null,
-  query: string,
-  uiLang: string,
-): Promise<AdhocPick> {
-  const languages = ctx?.profile.languages ?? [];
-  const excluded = new Set<number>([
-    ...(ctx?.ratedIds ?? []),
-    ...(ctx?.denyIds ?? []),
-    ...(ctx?.excludedIds ?? []),
-  ]);
-  const genreMap = await getGenreMap(c, uiLang).catch(() => new Map<number, string>());
-  const rules = ctx?.rules ?? [];
-  const byId = new Map<number, Candidate>();
-  const absorb = (results: TmdbSearchResult[]) => {
-    for (const r of results) {
-      if (isBlockedId(r.id) || excluded.has(r.id)) continue;
-      if (languages.length > 0 && !languages.includes(r.original_language)) continue;
-      if (byId.has(r.id)) continue;
-      const cand = toCandidate(r, genreMap);
-      if (!passesHardRules(factsForCandidate(cand), rules)) continue;
-      byId.set(r.id, cand);
-    }
-  };
-
-  const [discover, trending] = await Promise.all([
-    discoverShows(c, uiLang, { languages, page: 1, minVoteCount: 10 }),
-    getTrending(c, uiLang),
-  ]);
-  absorb(discover);
-  absorb(trending);
-
-  // If the query names a show, its recommendations join the pool.
-  try {
-    const hits = await searchShows(c, query, uiLang);
-    if (hits.length > 0) {
-      const recs = await getShowRecommendations(c, hits[0].id, uiLang);
-      absorb(recs);
-    }
-  } catch {
-    // Query-driven expansion is best-effort.
-  }
-
-  const candidates = [...byId.values()];
-  if (candidates.length === 0) {
-    throw new Error('no_candidates');
-  }
-
-  let pick = candidates[0];
-  if (c.env.AI) {
-    const vectors = await embedTextsWithEnv(c.env, [
-      query,
-      ...candidates.map((cand) =>
-        candidateEmbedText(cand.title, cand.genreNames, cand.originalLanguage, cand.originCountry),
-      ),
-    ]);
-    if (vectors && vectors.length === candidates.length + 1) {
-      let best = -Infinity;
-      vectors.slice(1).forEach((v, i) => {
-        const sim = cosine(vectors[0], v);
-        if (sim > best) {
-          best = sim;
-          pick = candidates[i];
-        }
-      });
-    }
-  } else {
-    candidates.sort((a, b) => b.popularity - a.popularity);
-    pick = candidates[0];
-  }
-
-  const provider = getRankLlmProvider(c.env);
-  const rationale = await provider.generate(
-    buildAdhocRationalePrompt(
-      query,
-      {
-        tmdbId: pick.tmdbId,
-        title: pick.title,
-        year: pick.firstAirDate ? pick.firstAirDate.slice(0, 4) : '',
-        genres: pick.genreNames,
-        originalLanguage: pick.originalLanguage,
-        originCountry: pick.originCountry,
-      },
-      uiLang,
-    ),
-  );
-
-  return {
-    tmdbId: pick.tmdbId,
-    title: pick.title,
-    originalLanguage: pick.originalLanguage,
-    firstAirDate: pick.firstAirDate,
-    posterPath: pick.posterPath,
-    genres: pick.genreNames,
-    rationale: rationale.trim(),
-  };
-}

@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { normalizeTitle, parseTasteRecord, parseTasteSummary, serializeTasteRecord, serializeTasteSummary, type PreferenceRule, type TasteRecord, type TasteSections } from './util';
+import { normalizeTitle, parseMoodRulesJson, parseTasteRecord, parseTasteSummary, PRESET_MOODS, serializeTasteRecord, serializeTasteSummary, type PreferenceRule, type TasteRecord, type TasteSections } from './util';
 
 /**
  * D1 access for profile-scoped state. Every function here takes an
@@ -22,6 +22,8 @@ export interface ProfileRow {
   iconRef: string | null;
   languages: string[];
   uiLanguage: string;
+  /** Persisted mood selection: null = the main list. Stays set until the user picks the main list or deletes the mood. */
+  activeMoodId: string | null;
   createdAt: number;
 }
 
@@ -139,7 +141,7 @@ function parseLanguages(json: string | null): string[] {
 export async function loadProfile(db: D1Database, profileId: string): Promise<ProfileRow | null> {
   const row = await db
     .prepare(
-      'SELECT id, account_id, name, icon_kind, icon_ref, languages_json, ui_language, created_at FROM profiles WHERE id = ?',
+      'SELECT id, account_id, name, icon_kind, icon_ref, languages_json, ui_language, active_mood_id, created_at FROM profiles WHERE id = ?',
     )
     .bind(profileId)
     .first<Record<string, unknown>>();
@@ -152,6 +154,7 @@ export async function loadProfile(db: D1Database, profileId: string): Promise<Pr
     iconRef: row['icon_ref'] == null ? null : String(row['icon_ref']),
     languages: parseLanguages(String(row['languages_json'] ?? '[]')),
     uiLanguage: String(row['ui_language']),
+    activeMoodId: row['active_mood_id'] == null ? null : String(row['active_mood_id']),
     createdAt: Number(row['created_at']),
   };
 }
@@ -416,12 +419,16 @@ export async function pruneStoredLists(
   profileId: string,
   tmdbId: number,
 ): Promise<void> {
+  // All moods: a rated/denied show must leave every stored list, not
+  // just the active one, or it resurfaces when an inactive mood is
+  // picked again.
   const res = await db
-    .prepare('SELECT kind, pool_json, snapshot_json FROM recommendation_lists WHERE profile_id = ?')
+    .prepare('SELECT kind, mood_id, pool_json, snapshot_json FROM recommendation_lists WHERE profile_id = ?')
     .bind(profileId)
     .all<Record<string, unknown>>();
   for (const r of res.results ?? []) {
     const kind = String(r['kind']);
+    const moodId = String(r['mood_id'] ?? '');
     let poolJson = String(r['pool_json']);
     let snapshotJson = String(r['snapshot_json']);
     let changed = false;
@@ -456,9 +463,9 @@ export async function pruneStoredLists(
     if (changed) {
       await db
         .prepare(
-          'UPDATE recommendation_lists SET pool_json = ?, snapshot_json = ? WHERE profile_id = ? AND kind = ?',
+          'UPDATE recommendation_lists SET pool_json = ?, snapshot_json = ? WHERE profile_id = ? AND kind = ? AND mood_id = ?',
         )
-        .bind(poolJson, snapshotJson, profileId, kind)
+        .bind(poolJson, snapshotJson, profileId, kind, moodId)
         .run();
     }
   }
@@ -474,12 +481,13 @@ export interface StoredList {
 export async function loadStoredLists(
   db: D1Database,
   profileId: string,
+  moodId = '',
 ): Promise<{ casual: StoredList | null; deep: StoredList | null }> {
   const res = await db
     .prepare(
-      'SELECT kind, pool_json, snapshot_json, short_reason, updated_at FROM recommendation_lists WHERE profile_id = ?',
+      'SELECT kind, pool_json, snapshot_json, short_reason, updated_at FROM recommendation_lists WHERE profile_id = ? AND mood_id = ?',
     )
-    .bind(profileId)
+    .bind(profileId, moodId)
     .all<Record<string, unknown>>();
   let casual: StoredList | null = null;
   let deep: StoredList | null = null;
@@ -503,13 +511,14 @@ export async function saveStoredList(
   poolJson: string,
   snapshotJson: string,
   shortReason: string | null,
+  moodId = '',
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO recommendation_lists (profile_id, kind, pool_json, snapshot_json, short_reason, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(profile_id, kind) DO UPDATE SET pool_json = excluded.pool_json, snapshot_json = excluded.snapshot_json, short_reason = excluded.short_reason, updated_at = excluded.updated_at`,
+      `INSERT INTO recommendation_lists (profile_id, kind, mood_id, pool_json, snapshot_json, short_reason, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(profile_id, kind, mood_id) DO UPDATE SET pool_json = excluded.pool_json, snapshot_json = excluded.snapshot_json, short_reason = excluded.short_reason, updated_at = excluded.updated_at`,
     )
-    .bind(profileId, kind, poolJson, snapshotJson, shortReason, Date.now())
+    .bind(profileId, kind, moodId, poolJson, snapshotJson, shortReason, Date.now())
     .run();
 }
 
@@ -574,6 +583,7 @@ export async function createProfile(
     iconRef,
     languages,
     uiLanguage,
+    activeMoodId: null,
     createdAt,
   };
 }
@@ -600,6 +610,139 @@ export async function updateProfile(
     .bind(next.name, next.iconKind, next.iconRef, JSON.stringify(next.languages), next.uiLanguage, profileId)
     .run();
   return next;
+}
+
+// ---------------------------------------------------------------- moods
+// A Mood is an overlay: its own text + extracted rules, and its own
+// stored lists (recommendation_lists keyed by mood_id). The fixed
+// profile rules are never modified — generation merges them with the
+// mood's rules (util.effectiveRules) and the mood's text rides along
+// as a prose suffix in the rank prompt. Presets and user-created
+// moods are the same rows; `source` only records the origin.
+
+export interface MoodRow {
+  id: string;
+  profileId: string;
+  text: string;
+  rules: PreferenceRule[];
+  source: 'preset' | 'user';
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+function moodFromRow(r: Record<string, unknown>): MoodRow {
+  return {
+    id: String(r['id']),
+    profileId: String(r['profile_id']),
+    text: String(r['text'] ?? ''),
+    rules: parseMoodRulesJson(r['rules_json'] == null ? null : String(r['rules_json'])),
+    source: r['source'] === 'preset' ? 'preset' : 'user',
+    createdAt: Number(r['created_at']),
+    lastUsedAt: Number(r['last_used_at']),
+  };
+}
+
+/** Moods most-recently-used first (activation bumps last_used_at). */
+export async function listMoods(db: D1Database, profileId: string): Promise<MoodRow[]> {
+  const res = await db
+    .prepare(
+      'SELECT id, profile_id, text, rules_json, source, created_at, last_used_at FROM moods WHERE profile_id = ? ORDER BY last_used_at DESC, created_at ASC',
+    )
+    .bind(profileId)
+    .all<Record<string, unknown>>();
+  return (res.results ?? []).map(moodFromRow);
+}
+
+export async function getMood(
+  db: D1Database,
+  profileId: string,
+  moodId: string,
+): Promise<MoodRow | null> {
+  const row = await db
+    .prepare(
+      'SELECT id, profile_id, text, rules_json, source, created_at, last_used_at FROM moods WHERE profile_id = ? AND id = ?',
+    )
+    .bind(profileId, moodId)
+    .first<Record<string, unknown>>();
+  return row ? moodFromRow(row) : null;
+}
+
+export async function createMood(
+  db: D1Database,
+  profileId: string,
+  text: string,
+  rules: PreferenceRule[],
+  source: 'preset' | 'user',
+): Promise<MoodRow> {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  await db
+    .prepare(
+      'INSERT INTO moods (id, profile_id, text, rules_json, source, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    )
+    .bind(id, profileId, text, JSON.stringify(rules), source, now, now)
+    .run();
+  return { id, profileId, text, rules, source, createdAt: now, lastUsedAt: now };
+}
+
+/** Seed the preset moods for a newly created profile (existing profiles were seeded by migration 0004). */
+export async function seedPresetMoods(
+  db: D1Database,
+  profileId: string,
+  uiLanguage: string,
+): Promise<void> {
+  for (const preset of PRESET_MOODS) {
+    await createMood(
+      db,
+      profileId,
+      uiLanguage === 'he' ? preset.textHe : preset.textEn,
+      preset.rules,
+      'preset',
+    );
+  }
+}
+
+/**
+ * Delete a mood and its stored lists. If it was the active mood,
+ * the profile falls back to the main list. No edit in v1 — delete
+ * and recreate (the text re-extracts on creation).
+ */
+export async function deleteMood(db: D1Database, profileId: string, moodId: string): Promise<boolean> {
+  const existing = await getMood(db, profileId, moodId);
+  if (!existing) return false;
+  await db
+    .prepare('DELETE FROM recommendation_lists WHERE profile_id = ? AND mood_id = ?')
+    .bind(profileId, moodId)
+    .run();
+  await db.prepare('DELETE FROM moods WHERE profile_id = ? AND id = ?').bind(profileId, moodId).run();
+  await db
+    .prepare('UPDATE profiles SET active_mood_id = NULL WHERE id = ? AND active_mood_id = ?')
+    .bind(profileId, moodId)
+    .run();
+  return true;
+}
+
+/**
+ * Persist the active mood (null = main list). The selection survives
+ * reloads and profile switches until the user picks the main list or
+ * deletes the mood. Activation bumps last_used_at for recency order.
+ * Returns false when the mood id does not belong to the profile.
+ */
+export async function setActiveMood(
+  db: D1Database,
+  profileId: string,
+  moodId: string | null,
+): Promise<boolean> {
+  if (moodId !== null) {
+    const mood = await getMood(db, profileId, moodId);
+    if (!mood) return false;
+    await db
+      .prepare('UPDATE moods SET last_used_at = ? WHERE profile_id = ? AND id = ?')
+      .bind(Date.now(), profileId, moodId)
+      .run();
+  }
+  await db.prepare('UPDATE profiles SET active_mood_id = ? WHERE id = ?').bind(moodId, profileId).run();
+  return true;
 }
 
 /** Latest feedback outcome for a show, matched by id or normalized title. */

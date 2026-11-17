@@ -1058,10 +1058,22 @@ const removalReq = llm.buildRemovalCheckPrompt(
 const removalOut = await mockProvider.generate(removalReq);
 assert.deepEqual(util.parseRemovalCheckResponse(removalOut, new Set([11, 22, 33])), []);
 
-const adhocReq = llm.buildAdhocRationalePrompt('something funny', rankCands[0], 'en');
-const adhocOut = await mockProvider.generate(adhocReq);
-assert.ok(adhocOut.includes('Alpha Show') && adhocOut.includes('2020'));
-assert.equal(adhocOut, await mockProvider.generate(adhocReq));
+// --- mood rule extraction: prompt marker + mock extraction + parser ---
+const moodReq = llm.buildMoodExtractionPrompt('I want to see an Israeli drama series');
+assert.ok(moodReq.system.includes('MOOD RULE EXTRACTION'));
+assert.equal(moodReq.user, 'I want to see an Israeli drama series');
+const moodOut = await mockProvider.generate(moodReq);
+assert.ok(!moodOut.includes('unrecognized prompt'), 'mock handles the mood prompt');
+assert.equal(moodOut, await mockProvider.generate(moodReq), 'mock extraction is deterministic');
+const moodRules = llm.parseMoodExtractionResponse(moodOut);
+assert.ok(Array.isArray(moodRules));
+assert.deepEqual(
+  llm.parseMoodExtractionResponse('{"rules": [{"dimension": "genre", "operator": "is", "value": 18, "mode": "hard"}]}'),
+  [{ dimension: 'genre', operator: 'is', value: 18, mode: 'hard' }],
+);
+assert.deepEqual(llm.parseMoodExtractionResponse('```json\n{"rules": []}\n```'), []);
+assert.deepEqual(llm.parseMoodExtractionResponse('not json at all'), []);
+assert.deepEqual(llm.parseMoodExtractionResponse('{"rules": [{"dimension": "genre", "operator": "is", "value": 999}]}'), []);
 
 // --- mock embeddings: deterministic, normalized, hash-derived ---
 assert.equal(mockLlm.MOCK_EMBEDDING_DIM, 64);
@@ -1358,6 +1370,57 @@ assert.equal(util.languagePoolMinimum(0, 2), 0);
   // Empty pool stays empty; zero minimum is a no-op.
   assert.deepEqual(util.ensureLanguageMinimums(ordered, [], langOf, ['he', 'en'], 8), []);
   assert.strictEqual(util.ensureLanguageMinimums(ordered, picked, langOf, ['he', 'en'], 0), picked);
+}
+
+// effectiveRules — dimension-level override: a mood rule on a
+// dimension suppresses every fixed rule on that dimension, and the
+// fixed list is never mutated.
+{
+  const fixed = [
+    { dimension: 'genre', operator: 'isNot', value: 10764, mode: 'hard' },
+    { dimension: 'genre', operator: 'isNot', value: 10763, mode: 'soft' },
+    { dimension: 'seasons', operator: 'gte', value: 3, mode: 'soft' },
+  ];
+  const overlay = [{ dimension: 'genre', operator: 'is', value: 18, mode: 'hard' }];
+  assert.deepEqual(util.effectiveRules(fixed, overlay), [
+    { dimension: 'seasons', operator: 'gte', value: 3, mode: 'soft' },
+    { dimension: 'genre', operator: 'is', value: 18, mode: 'hard' },
+  ]);
+  assert.equal(fixed.length, 3, 'fixed rules untouched');
+  assert.deepEqual(util.effectiveRules(fixed, []), fixed);
+  assert.deepEqual(util.effectiveRules([], overlay), overlay);
+  assert.deepEqual(util.effectiveRules([], []), []);
+  // A mood rule on a dimension the fixed list does not use just appends.
+  assert.deepEqual(
+    util.effectiveRules([{ dimension: 'year', operator: 'gte', value: 2000, mode: 'soft' }], overlay),
+    [
+      { dimension: 'year', operator: 'gte', value: 2000, mode: 'soft' },
+      { dimension: 'genre', operator: 'is', value: 18, mode: 'hard' },
+    ],
+  );
+}
+
+// parseMoodRulesJson — bad JSON / bad rules read as no rules, never throw.
+assert.deepEqual(util.parseMoodRulesJson(null), []);
+assert.deepEqual(util.parseMoodRulesJson(''), []);
+assert.deepEqual(util.parseMoodRulesJson('not json'), []);
+assert.deepEqual(util.parseMoodRulesJson('[{"dimension":"genre","operator":"is","value":999,"mode":"hard"}]'), []);
+assert.deepEqual(
+  util.parseMoodRulesJson('[{"dimension":"country","operator":"is","value":"il","mode":"hard"}]'),
+  [{ dimension: 'country', operator: 'is', value: 'IL', mode: 'hard' }],
+);
+
+// PRESET_MOODS — every preset's rules must survive validation
+// unchanged (the migration embeds the same rules as SQL literals).
+{
+  assert.equal(util.PRESET_MOODS.length, 4);
+  const keys = new Set();
+  for (const preset of util.PRESET_MOODS) {
+    assert.ok(preset.key && !keys.has(preset.key), 'unique preset key');
+    keys.add(preset.key);
+    assert.ok(preset.textEn && preset.textHe, 'bilingual preset text');
+    assert.deepEqual(util.validateRules(preset.rules), preset.rules, `preset ${preset.key} rules valid`);
+  }
 }
 
 await writeFile(join(root, 'node_modules', '.selftest-ok'), 'ok');

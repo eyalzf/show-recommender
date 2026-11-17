@@ -20,21 +20,27 @@ import {
 } from './tmdb';
 import {
   buildConsolidationPrompt,
+  buildMoodExtractionPrompt,
   getLlmProvider,
   getRankLlmProvider,
   isDevWorker,
+  parseMoodExtractionResponse,
   resolveLlmMode,
   type ConsolidationNote,
 } from './llm';
 import {
   bootstrapStatusFromFeedback,
+  createMood,
   createProfile,
+  deleteMood,
   ensureAccount,
+  getMood,
   insertDeny,
   insertExternalRec,
   insertFeedback,
   insertNote,
   invalidateLists,
+  listMoods,
   loadBootstrapStatus,
   loadProfile,
   loadProfileContext,
@@ -44,15 +50,18 @@ import {
   pruneStoredLists,
   saveStoredList,
   saveTasteRecord,
+  seedPresetMoods,
+  setActiveMood,
   updateProfile,
   type BootstrapStatus,
+  type MoodRow,
 } from './db';
 import {
-  generateAdhocPick,
   generateLists,
   refillSnapshot,
   type GeneratedLists,
   type ListItemOut,
+  type MoodOverlay,
 } from './engine';
 import { loadKnownNames, recomputePeopleScores } from './trust';
 import {
@@ -257,6 +266,7 @@ function profileView(
     iconRef: string | null;
     languages: string[];
     uiLanguage: string;
+    activeMoodId?: string | null;
   },
   bootstrap?: BootstrapStatus,
 ) {
@@ -267,6 +277,7 @@ function profileView(
     iconRef: p.iconRef,
     languages: p.languages,
     uiLanguage: p.uiLanguage,
+    activeMoodId: p.activeMoodId ?? null,
     bootstrap,
   };
 }
@@ -277,7 +288,7 @@ app.get('/api/profiles', async (c: Ctx) => {
   }
   const auth = getAuth(c);
   const rows = await c.env.DB!.prepare(
-    'SELECT id, name, icon_kind, icon_ref, languages_json, ui_language FROM profiles WHERE account_id = ? ORDER BY created_at',
+    'SELECT id, name, icon_kind, icon_ref, languages_json, ui_language, active_mood_id FROM profiles WHERE account_id = ? ORDER BY created_at',
   )
     .bind(auth.accountId)
     .all();
@@ -293,6 +304,7 @@ app.get('/api/profiles', async (c: Ctx) => {
           iconRef: r['icon_ref'] == null ? null : String(r['icon_ref']),
           languages: JSON.parse(String(r['languages_json'] ?? '[]')) as string[],
           uiLanguage: String(r['ui_language']),
+          activeMoodId: r['active_mood_id'] == null ? null : String(r['active_mood_id']),
         },
         bootstrap,
       );
@@ -331,6 +343,10 @@ app.post('/api/profiles', async (c: Ctx) => {
     kind === 'initials' ? null : (iconRef ?? null),
   );
   const bootstrap = await loadBootstrapStatus(c.env.DB!, profile.id);
+  // New profiles start with the preset moods (existing profiles were
+  // seeded by migration 0004). Seeding is best-effort relative to the
+  // profile itself: the profile is already created at this point.
+  await seedPresetMoods(c.env.DB!, profile.id, uiLang);
   return c.json({ profile: profileView(profile, bootstrap) }, 201);
 });
 
@@ -422,9 +438,22 @@ async function listsResponse(
   profileId: string,
   uiLang: string,
   forceRefresh: boolean,
+  moodId = '',
 ) {
   const db = c.env.DB!;
-  const stored = await loadStoredLists(db, profileId);
+  // A mood id selects that mood's stored lists (own reservoirs, own
+  // snapshots) and its overlay for generation/refill. '' is the main
+  // list. Toggling between moods is a fetch of the stored snapshot —
+  // no regeneration unless the snapshot was invalidated (stale).
+  let overlay: MoodOverlay | undefined;
+  if (moodId) {
+    const mood = await getMood(db, profileId, moodId);
+    if (!mood) {
+      return c.json({ error: 'not_found', message: 'Mood not found.' }, 404);
+    }
+    overlay = { text: mood.text, rules: mood.rules };
+  }
+  const stored = await loadStoredLists(db, profileId, moodId);
   const parseSnapshot = (json: string): ListItemOut[] => {
     try {
       const parsed: unknown = JSON.parse(json);
@@ -445,6 +474,7 @@ async function listsResponse(
     stub: false,
     stale,
     profileId,
+    moodId,
     updatedAt:
       stored.casual && stored.deep
         ? new Date(Math.max(stored.casual.updatedAt, stored.deep.updatedAt)).toISOString()
@@ -479,6 +509,7 @@ async function listsResponse(
             parseReservoirEntries(stored.casual.poolJson),
             ctx,
             uiLang,
+            overlay,
           );
           if (refilled.length !== casual.length) {
             casual = refilled;
@@ -490,6 +521,7 @@ async function listsResponse(
               stored.casual.poolJson,
               JSON.stringify(casual),
               casualReason,
+              moodId,
             );
           }
         }
@@ -500,6 +532,7 @@ async function listsResponse(
             parseReservoirEntries(stored.deep.poolJson),
             ctx,
             uiLang,
+            overlay,
           );
           if (refilled.length !== deep.length) {
             deep = refilled;
@@ -511,6 +544,7 @@ async function listsResponse(
               stored.deep.poolJson,
               JSON.stringify(deep),
               deepReason,
+              moodId,
             );
           }
         }
@@ -530,6 +564,7 @@ async function listsResponse(
       stub: false,
       stale: false,
       profileId,
+      moodId,
       updatedAt: null,
       casual: [],
       deep: [],
@@ -546,7 +581,7 @@ async function listsResponse(
   };
   let generated: GeneratedLists;
   try {
-    generated = await generateLists(c, ctx, uiLang, prev);
+    generated = await generateLists(c, ctx, uiLang, prev, overlay);
   } catch (err) {
     // On engine failure, serve the last snapshots as stale rather than
     // failing outright — but never serve stale data as fresh, and
@@ -562,12 +597,13 @@ async function listsResponse(
     }
     throw err;
   }
-  await saveStoredList(db, profileId, 'casual', serializeReservoirEntries(generated.casual.pool), JSON.stringify(generated.casual.snapshot), generated.casual.shortReason);
-  await saveStoredList(db, profileId, 'deep', serializeReservoirEntries(generated.deep.pool), JSON.stringify(generated.deep.snapshot), generated.deep.shortReason);
+  await saveStoredList(db, profileId, 'casual', serializeReservoirEntries(generated.casual.pool), JSON.stringify(generated.casual.snapshot), generated.casual.shortReason, moodId);
+  await saveStoredList(db, profileId, 'deep', serializeReservoirEntries(generated.deep.pool), JSON.stringify(generated.deep.snapshot), generated.deep.shortReason, moodId);
   return {
     stub: false,
     stale: false,
     profileId,
+    moodId,
     updatedAt: new Date(Math.max(generated.casual.updatedAt, generated.deep.updatedAt)).toISOString(),
     casual: generated.casual.snapshot,
     deep: generated.deep.snapshot,
@@ -585,6 +621,7 @@ app.get('/api/lists', async (c: Ctx) => {
       stub: true,
       stale: false,
       profileId,
+      moodId: '',
       updatedAt: null,
       casual: STUB_CASUAL,
       deep: STUB_DEEP,
@@ -595,7 +632,8 @@ app.get('/api/lists', async (c: Ctx) => {
   }
   const uiLang = c.req.query('lang') === 'he' ? 'he' : 'en';
   const forceRefresh = c.req.query('refresh') === '1';
-  const res = await listsResponse(c, profileId, uiLang, forceRefresh);
+  const moodId = c.req.query('mood') ?? '';
+  const res = await listsResponse(c, profileId, uiLang, forceRefresh, moodId);
   if (res instanceof Response) return res;
   return c.json(res);
 });
@@ -604,15 +642,132 @@ app.post('/api/lists/refresh', async (c: Ctx) => {
   const denied = dbRequired(c);
   if (denied) return denied;
   const body = await c.req.json().catch(() => ({}));
-  const { profileId, lang } = body as { profileId?: string; lang?: string };
+  const { profileId, lang, moodId } = body as { profileId?: string; lang?: string; moodId?: string };
   if (!profileId) {
     return c.json({ error: 'bad_request', message: 'profileId is required.' }, 400);
   }
   await requireProfileAccess(c, profileId);
   const uiLang = lang === 'he' ? 'he' : 'en';
-  const res = await listsResponse(c, profileId, uiLang, true);
+  const res = await listsResponse(c, profileId, uiLang, true, moodId ?? '');
   if (res instanceof Response) return res;
   return c.json(res);
+});
+
+// ---------------------------------------------------------------- moods
+// A Mood is an overlay on the main list: its own text + extracted
+// rules, its own stored lists, one active at a time per profile.
+// Creation extracts rules from the mood text ONLY (the fixed rules
+// are already stored and merge deterministically at generation).
+// The active selection persists on the profile until the user picks
+// the main list or deletes the mood.
+
+function moodView(m: MoodRow) {
+  return {
+    id: m.id,
+    text: m.text,
+    rules: m.rules,
+    source: m.source,
+    createdAt: m.createdAt,
+    lastUsedAt: m.lastUsedAt,
+  };
+}
+
+app.get('/api/moods', async (c: Ctx) => {
+  const profileId = c.req.query('profileId') ?? DEV_PROFILE_ID;
+  await requireProfileAccess(c, profileId);
+  if (!hasDb(c)) {
+    return c.json({ moods: [], genreLabels: {}, stub: true });
+  }
+  const lang = c.req.query('lang') === 'he' ? 'he' : 'en';
+  const moods = await listMoods(c.env.DB!, profileId);
+  // Localized genre labels for rule display (same pattern as /api/taste).
+  const genreRuleIds = [
+    ...new Set(
+      moods.flatMap((m) =>
+        m.rules.filter((r) => r.dimension === 'genre').map((r) => Number(r.value)),
+      ),
+    ),
+  ];
+  const genreLabels: Record<string, string> = {};
+  if (genreRuleIds.length > 0) {
+    const canonical = new Map(TMDB_TV_GENRES.map((g) => [g.id, g.name]));
+    try {
+      const map = await getGenreMap(c, lang);
+      for (const id of genreRuleIds) genreLabels[id] = map.get(id) ?? canonical.get(id) ?? String(id);
+    } catch {
+      for (const id of genreRuleIds) genreLabels[id] = canonical.get(id) ?? String(id);
+    }
+  }
+  return c.json({ moods: moods.map(moodView), genreLabels });
+});
+
+app.post('/api/moods', async (c: Ctx) => {
+  const denied = dbRequired(c);
+  if (denied) return denied;
+  const body = await c.req.json().catch(() => ({}));
+  const { profileId, text } = body as { profileId?: string; text?: string };
+  const cleanText = String(text ?? '').trim();
+  if (!profileId || !cleanText || cleanText.length > 120) {
+    return c.json(
+      { error: 'bad_request', message: 'profileId and a mood text (1-120 chars) are required.' },
+      400,
+    );
+  }
+  await requireProfileAccess(c, profileId);
+  // Rules come from the mood text alone, grounded against it (a rule
+  // the text never names is dropped — the same backstop as
+  // consolidation). Extraction failure must not block creation: a
+  // mood with no rules still works through its prose text.
+  const provider = getLlmProvider(c.env);
+  let rules: PreferenceRule[] = [];
+  try {
+    const raw = await provider.generate(buildMoodExtractionPrompt(cleanText));
+    rules = groundRules(parseMoodExtractionResponse(raw), [cleanText]);
+  } catch {
+    rules = [];
+  }
+  const mood = await createMood(c.env.DB!, profileId, cleanText, rules, 'user');
+  return c.json({ mood: moodView(mood), provider: provider.name }, 201);
+});
+
+app.delete('/api/moods/:id', async (c: Ctx) => {
+  const denied = dbRequired(c);
+  if (denied) return denied;
+  const profileId = c.req.query('profileId');
+  const moodId = c.req.param('id');
+  if (!profileId || !moodId) {
+    return c.json({ error: 'bad_request', message: 'profileId and a mood id are required.' }, 400);
+  }
+  await requireProfileAccess(c, profileId);
+  const deleted = await deleteMood(c.env.DB!, profileId, moodId);
+  if (!deleted) {
+    return c.json({ error: 'not_found', message: 'Mood not found.' }, 404);
+  }
+  return c.json({ ok: true });
+});
+
+app.post('/api/moods/active', async (c: Ctx) => {
+  const denied = dbRequired(c);
+  if (denied) return denied;
+  const body = await c.req.json().catch(() => ({}));
+  const { profileId, moodId } = body as { profileId?: string; moodId?: string | null };
+  if (!profileId || (moodId !== null && typeof moodId !== 'string')) {
+    return c.json(
+      { error: 'bad_request', message: 'profileId and a mood id (or null for the main list) are required.' },
+      400,
+    );
+  }
+  await requireProfileAccess(c, profileId);
+  const ok = await setActiveMood(c.env.DB!, profileId, moodId);
+  if (!ok) {
+    return c.json({ error: 'not_found', message: 'Mood not found.' }, 404);
+  }
+  const profile = await loadProfile(c.env.DB!, profileId);
+  if (!profile) {
+    return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
+  }
+  const bootstrap = await loadBootstrapStatus(c.env.DB!, profileId);
+  return c.json({ profile: profileView(profile, bootstrap) });
 });
 
 // ---------------------------------------------------------------- feedback
@@ -1114,31 +1269,6 @@ app.post('/api/recommendations', async (c: Ctx) => {
   }
   await invalidateLists(c.env.DB!, profileId);
   return c.json({ ok: true, id });
-});
-
-// ---------------------------------------------------------------- ad-hoc
-// Independent by design: reads the profile's filters/exclusions, writes
-// nothing to taste or lists (build rule 8), except an adhoc_history row
-// for reference.
-
-app.post('/api/adhoc', async (c: Ctx) => {
-  const body = await c.req.json().catch(() => ({}));
-  const { profileId, query, lang } = body as { profileId?: string; query?: string; lang?: string };
-  if (!profileId || !String(query ?? '').trim()) {
-    return c.json({ error: 'bad_request', message: 'profileId and a non-empty query are required.' }, 400);
-  }
-  await requireProfileAccess(c, profileId);
-  const uiLang = lang === 'he' ? 'he' : 'en';
-  const ctx = hasDb(c) ? await loadProfileContext(c.env.DB!, profileId, uiLang) : null;
-  const result = await generateAdhocPick(c, ctx, String(query).trim(), uiLang);
-  if (hasDb(c)) {
-    await c.env.DB!.prepare(
-      'INSERT INTO adhoc_history (id, profile_id, query_text, result_json, created_at) VALUES (?, ?, ?, ?, ?)',
-    )
-      .bind(crypto.randomUUID(), profileId, String(query).trim(), JSON.stringify(result), Date.now())
-      .run();
-  }
-  return c.json({ result, provider: getRankLlmProvider(c.env).name, stub: false });
 });
 
 // ---------------------------------------------------------------- static assets

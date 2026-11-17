@@ -23,8 +23,7 @@ export type ScreenName =
   | 'home'
   | 'detail'
   | 'taste'
-  | 'recommendations'
-  | 'adhoc';
+  | 'recommendations';
 
 /** Bootstrap (onboarding) progress, computed server-side from the feedback log. */
 export interface BootstrapStatus {
@@ -41,6 +40,8 @@ export interface Profile {
   iconRef: string | null;
   languages: string[];
   uiLanguage: string;
+  /** Persisted mood selection: null = the main list. Absent on locally built profiles — treated as null. */
+  activeMoodId?: string | null;
   noteCount?: number;
   listsUpdatedAt?: string | null;
   /** Absent in stub/demo mode — treated as complete (no gate). */

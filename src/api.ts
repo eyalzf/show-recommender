@@ -41,12 +41,31 @@ export interface TasteResponse {
 export interface ListsResponse {
   stub?: boolean;
   stale?: boolean;
+  /** Echo of the requested mood ('': the main list). */
+  moodId?: string;
   updatedAt: string | null;
   casual: ListItem[];
   deep: ListItem[];
   shortReason: string | null;
   casualShortReason: string | null;
   deepShortReason: string | null;
+}
+
+/** A Mood overlay: its own text + extracted rules; lists are stored per mood server-side. */
+export interface Mood {
+  id: string;
+  text: string;
+  rules: PreferenceRule[];
+  source: 'preset' | 'user';
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+export interface MoodsResponse {
+  stub?: boolean;
+  moods: Mood[];
+  /** Localized genre labels for genre rules, keyed by genre id. */
+  genreLabels: Record<string, string>;
 }
 
 export const api = {
@@ -101,15 +120,35 @@ export const api = {
     return body as { ok: true; iconRef: string };
   },
 
-  lists: (profileId: string, lang: UiLang, refresh = false) =>
+  lists: (profileId: string, lang: UiLang, refresh = false, moodId = '') =>
     req<ListsResponse>(
-      `/api/lists?profileId=${encodeURIComponent(profileId)}&lang=${lang}${refresh ? '&refresh=1' : ''}`,
+      `/api/lists?profileId=${encodeURIComponent(profileId)}&lang=${lang}${refresh ? '&refresh=1' : ''}${moodId ? `&mood=${encodeURIComponent(moodId)}` : ''}`,
     ),
 
-  refreshLists: (profileId: string, lang: UiLang) =>
+  refreshLists: (profileId: string, lang: UiLang, moodId = '') =>
     req<ListsResponse>('/api/lists/refresh', {
       method: 'POST',
-      body: JSON.stringify({ profileId, lang }),
+      body: JSON.stringify({ profileId, lang, moodId }),
+    }),
+
+  moods: (profileId: string, lang: UiLang) =>
+    req<MoodsResponse>(`/api/moods?profileId=${encodeURIComponent(profileId)}&lang=${lang}`),
+
+  createMood: (profileId: string, text: string) =>
+    req<{ mood: Mood; provider: string }>('/api/moods', {
+      method: 'POST',
+      body: JSON.stringify({ profileId, text }),
+    }),
+
+  deleteMood: (profileId: string, moodId: string) =>
+    req<{ ok: true }>(`/api/moods/${encodeURIComponent(moodId)}?profileId=${encodeURIComponent(profileId)}`, {
+      method: 'DELETE',
+    }),
+
+  setActiveMood: (profileId: string, moodId: string | null) =>
+    req<{ profile: Profile }>('/api/moods/active', {
+      method: 'POST',
+      body: JSON.stringify({ profileId, moodId }),
     }),
 
   feedback: (profileId: string, tmdbId: number, rating: string, reason: string, showTitle?: string, originalLanguage?: string) =>
@@ -167,10 +206,4 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ profileId, showTitle, kind, names, note }),
     }),
-
-  adhoc: (profileId: string, query: string, lang: UiLang) =>
-    req<{ result: { tmdbId: number; title: string; originalLanguage: string; firstAirDate: string; posterPath: string | null; genres: string[]; rationale: string }; provider: string }>(
-      '/api/adhoc',
-      { method: 'POST', body: JSON.stringify({ profileId, query, lang }) },
-    ),
 };

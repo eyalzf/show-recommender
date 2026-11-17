@@ -3,6 +3,7 @@ import { api, type PreferenceRule } from '../api';
 import type { Profile, TasteContradiction, TasteSectionKey, TasteSections, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
+import { formatRule } from '../formatRule';
 import { ALL_LANGUAGES } from '../profileMeta';
 import { useNotify } from '../components/Notifications';
 
@@ -225,34 +226,6 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   // Derived preference rules, shown read-only: they come from the
   // notes, and a new note is what changes them. Hard rules filter
   // the lists; soft rules nudge the ranking.
-  const formatRule = (rule: PreferenceRule): string => {
-    const cmp = rule.operator === 'gte' ? '≥' : '≤';
-    const body = (() => {
-      switch (rule.dimension) {
-        case 'genre':
-          return genreLabels[String(rule.value)] ?? String(rule.value);
-        case 'year':
-          return `${t(lang, 'ruleYear')} ${cmp} ${rule.value}`;
-        case 'country':
-          return `${t(lang, 'ruleCountry')} ${rule.value}`;
-        case 'status':
-          return `${t(lang, 'ruleStatus')} ${rule.value}`;
-        case 'seasons':
-          return `${t(lang, 'ruleSeasons')} ${cmp} ${rule.value}`;
-        case 'episodeMinutes':
-          return `${t(lang, 'ruleEpisodeMinutes')} ${cmp} ${rule.value} ${t(lang, 'ruleMinutes')}`;
-      }
-    })();
-    const prefix =
-      rule.mode === 'hard'
-        ? rule.operator === 'isNot'
-          ? t(lang, 'ruleNever')
-          : t(lang, 'ruleOnly')
-        : rule.operator === 'isNot'
-          ? t(lang, 'rulePreferNo')
-          : t(lang, 'rulePrefer');
-    return `${prefix}: ${body}`;
-  };
 
   return (
     <section>
@@ -319,7 +292,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
           <h3>{t(lang, 'tasteRules')}</h3>
           {rules.map((rule, i) => (
             <p key={`${rule.dimension}-${rule.operator}-${rule.value}-${rule.mode}-${i}`} className="summary-text">
-              {formatRule(rule)}
+              {formatRule(lang, rule, genreLabels)}
             </p>
           ))}
           <p className="taste-hint">{t(lang, 'tasteRulesHint')}</p>
