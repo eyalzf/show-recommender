@@ -512,6 +512,85 @@ for (const g of util.TMDB_TV_GENRES) {
 }
 assert.ok(util.GENRE_GROUNDING_CUES.find((c) => c.name === 'News').words.includes('אקטואליה'));
 
+// --- reservoir: parse/serialize, thresholds, taste equality ---
+const mkEntry = (id, extra = {}) => ({
+  tmdbId: id,
+  score: 0.5,
+  rationale: 'r',
+  risk: null,
+  title: `Show ${id}`,
+  originalTitle: `Show ${id}`,
+  originalLanguage: 'en',
+  originCountry: ['US'],
+  genreIds: [35],
+  firstAirDate: '2012-01-31',
+  popularity: 10,
+  voteAverage: 8,
+  voteCount: 100,
+  posterPath: null,
+  detailFacts: { status: 'Ended', seasons: 5, episodeMinutes: 20 },
+  ...extra,
+});
+const reservoirJson = util.serializeReservoirEntries([mkEntry(1), mkEntry(2)]);
+assert.deepEqual(util.parseReservoirEntries(reservoirJson), [mkEntry(1), mkEntry(2)]);
+assert.deepEqual(util.parseReservoirEntries(''), []);
+assert.deepEqual(util.parseReservoirEntries(null), []);
+assert.deepEqual(util.parseReservoirEntries('not json'), []);
+assert.deepEqual(util.parseReservoirEntries('{"a":1}'), []);
+// Legacy pool rows ({tmdbId, score} only) drop out -> rebuild path.
+assert.deepEqual(util.parseReservoirEntries('[{"tmdbId":39297,"score":0.97}]'), []);
+// Malformed entries dropped, duplicates collapse (first wins), cap 50.
+assert.deepEqual(
+  util.parseReservoirEntries(
+    JSON.stringify([mkEntry(1), { tmdbId: 'x' }, mkEntry(1, { title: 'Dup' }), mkEntry(2, { genreIds: 'nope' }), null]),
+  ),
+  [mkEntry(1)],
+);
+const fiftyOne = Array.from({ length: 51 }, (_, i) => mkEntry(100 + i));
+assert.equal(util.parseReservoirEntries(JSON.stringify(fiftyOne)).length, 50);
+assert.equal(util.serializeReservoirEntries(fiftyOne).length > 0, true);
+assert.equal(JSON.parse(util.serializeReservoirEntries(fiftyOne)).length, 50);
+// Defaults: missing optional fields coerce, bad detail facts -> nulls.
+assert.deepEqual(
+  util.parseReservoirEntries(JSON.stringify([{ tmdbId: 7, title: 'X', genreIds: [18] }])),
+  [
+    {
+      tmdbId: 7, score: 0, rationale: '', risk: null, title: 'X', originalTitle: 'X',
+      originalLanguage: '', originCountry: [], genreIds: [18], firstAirDate: '',
+      popularity: 0, voteAverage: 0, voteCount: 0, posterPath: null,
+      detailFacts: { status: null, seasons: null, episodeMinutes: null },
+    },
+  ],
+);
+// Facts from a stored entry (no fetch).
+assert.deepEqual(util.reservoirEntryFacts(mkEntry(1)), {
+  genreIds: [35], year: 2012, originCountry: ['US'], status: 'Ended', seasons: 5, episodeMinutes: 20,
+});
+assert.deepEqual(util.reservoirEntryFacts(mkEntry(1, { firstAirDate: '' })), {
+  genreIds: [35], year: null, originCountry: ['US'], status: 'Ended', seasons: 5, episodeMinutes: 20,
+});
+// Thresholds: <=10 rebuild, <30 top-up, >=30 re-rank.
+assert.equal(util.reservoirPath(0), 'rebuild');
+assert.equal(util.reservoirPath(10), 'rebuild');
+assert.equal(util.reservoirPath(11), 'topup');
+assert.equal(util.reservoirPath(29), 'topup');
+assert.equal(util.reservoirPath(30), 'rerank');
+assert.equal(util.reservoirPath(50), 'rerank');
+assert.equal(util.RESERVOIR_SIZE, 50);
+assert.equal(util.RESERVOIR_TOPUP_THRESHOLD, 30);
+assert.equal(util.RESERVOIR_REBUILD_THRESHOLD, 10);
+assert.equal(util.RESERVOIR_FRESH_BATCH, 10);
+// Taste-record equality: trim-insensitive sections, order-insensitive rules.
+const recA = { sections: { shared: 'a', casual: 'b', deep: 'c' }, rules: [R('genre', 'isNot', 10764, 'hard'), R('seasons', 'gte', 3, 'soft')] };
+assert.equal(util.tasteRecordsEqual(recA, structuredClone(recA)), true);
+assert.equal(
+  util.tasteRecordsEqual(recA, { sections: { shared: 'a ', casual: 'b', deep: 'c' }, rules: [R('seasons', 'gte', 3, 'soft'), R('genre', 'isNot', 10764, 'hard')] }),
+  true,
+);
+assert.equal(util.tasteRecordsEqual(recA, { ...recA, sections: { ...recA.sections, deep: 'different' } }), false);
+assert.equal(util.tasteRecordsEqual(recA, { ...recA, rules: [R('genre', 'isNot', 10764, 'hard')] }), false);
+assert.equal(util.tasteRecordsEqual(recA, { ...recA, rules: [R('genre', 'isNot', 10764, 'soft'), R('seasons', 'gte', 3, 'soft')] }), false);
+
 assert.equal(
   util.tasteTextForKind({ shared: 's', casual: 'c', deep: 'd' }, 'casual'),
   's\nc',
@@ -626,10 +705,19 @@ const capped = rerank.deterministicRerank(capItems2, 'casual', new Map(), 3);
 assert.equal(capped.ordered.filter((x) => x.cluster === 'comedy').length, 3);
 assert.deepEqual(capped.ordered.map((x) => x.tmdbId), [1, 2, 3, 6]);
 assert.equal(capped.capBound, true);
+// Deferred: the cap-blocked remainder is returned in input order for
+// narrow-pool relaxation — never silently dropped.
+assert.deepEqual(capped.deferred.map((x) => x.tmdbId), [4, 5]);
 // No cap pressure: all items ordered, capBound false
 const free = rerank.deterministicRerank(capItems2.slice(0, 3), 'casual', new Map(), 3);
 assert.equal(free.ordered.length, 3);
 assert.equal(free.capBound, false);
+assert.deepEqual(free.deferred, []);
+// relaxedDisplay: strict order first, deferred fill only leftover slots
+assert.deepEqual(rerank.relaxedDisplay([1, 2, 3, 6], [4, 5], 10), [1, 2, 3, 6, 4, 5]);
+assert.deepEqual(rerank.relaxedDisplay([1, 2, 3, 6], [4, 5], 4), [1, 2, 3, 6]); // cap still binds when full
+assert.deepEqual(rerank.relaxedDisplay([1, 2], [3, 4, 5], 3), [1, 2, 3]);
+assert.deepEqual(rerank.relaxedDisplay([], [3, 4], 10), [3, 4]);
 // Epsilon near-tie: item 2 (fit 0.97) beats item 1 (fit 1.0) on
 // novelty+freshness because it is within epsilon; item 3 (fit 0.5) cannot leap.
 const tieItems = [

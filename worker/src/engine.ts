@@ -36,6 +36,7 @@ import {
   NEGATIVE_DEMOTION_PENALTY,
   NEGATIVE_EXCLUSION_COSINE,
   noveltyFor,
+  relaxedDisplay,
   SHORT_TERM_BLEND_WEIGHT,
   type RerankCandidate,
 } from './rerank';
@@ -55,12 +56,17 @@ import {
   parseRemovalCheckResponse,
   passesHardRules,
   primaryDiscoverPlans,
+  RESERVOIR_FRESH_BATCH,
+  RESERVOIR_SIZE,
+  reservoirEntryFacts,
+  reservoirPath,
   selectCapped,
   softRuleScore,
   structureFor,
   tasteTextForKind,
   toneFor,
   type RankedEntry,
+  type ReservoirEntry,
   type ShowDetailFacts,
   type ShowFacts,
 } from './util';
@@ -102,9 +108,15 @@ import {
  * them. Each kind's re-rank prompt gets the Shared taste section plus
  * its own section, plus a labeled "recent signals" section; retrieval
  * embedding uses all sections joined. Prompts contain user text +
- * factual labels only (see llm.ts terms guardrail). The ranked pool
- * stays larger than 10 so removals promote; fewer than 10 are shown
- * with a reason, never padded.
+ * factual labels only (see llm.ts terms guardrail).
+ *
+ * Stability comes from a persistent ranked RESERVOIR (see util.ts):
+ * each kind keeps up to 50 shows in pool_json and displays 10.
+ * Regeneration prunes the reservoir (rated/denied/rule-failing shows
+ * drop), re-ranks the survivors with a fresh batch mixed in, tops up
+ * below 30 survivors, and rebuilds from scratch at 10 or fewer — so a
+ * refresh keeps good shows instead of churning them, and rating a
+ * show promotes the next reservoir entry without a regeneration.
  *
  * A deterministic post-pass then re-orders each kind's ranked list
  * (see rerank.deterministicRerank): MMR over embedding similarity,
@@ -114,11 +126,12 @@ import {
  * Top 10 from collapsing into one type of show: at most 3 shows per
  * genre-ID cluster per list (see clusterFor in util.ts), plus a looser
  * per-cluster cap on the rank pool so one cluster cannot crowd out the
- * rest before ranking. The Top 10 cap is STRICT: over-cap shows never
- * surface, even when that leaves a list short — the short-list reason
- * explains it, and no junk is ever added to fill slots. Only the pool
- * cap relaxes (a small pool keeps all its candidates for ranking; the
- * final cap still binds).
+ * rest before ranking. The display slice RELAXES the cap on narrow
+ * pools (see relaxedDisplay): cap-blocked shows fill only slots the
+ * strict order leaves empty, so a 2-show list while good same-cluster
+ * shows sat blocked cannot happen; on wide pools the cap still binds
+ * exactly as before. Fewer than 10 are shown with a reason only when
+ * the ranked pool itself holds fewer than 10 — never padded.
  *
  * Layered negative feedback (Meta pattern) runs at three stages:
  * retrieval excludes near-duplicates of denied/disliked shows by
@@ -175,7 +188,8 @@ export interface ListItemOut {
 }
 
 export interface GeneratedList {
-  pool: { tmdbId: number; score: number }[];
+  /** Persistent ranked reservoir (up to RESERVOIR_SIZE per kind); the snapshot slices its head. */
+  pool: ReservoirEntry[];
   snapshot: ListItemOut[];
   shortReason: string | null;
   updatedAt: number;
@@ -285,6 +299,61 @@ function toCandidate(r: TmdbSearchResult, genreMap: Map<number, string>): Candid
     negativeDemotion: 0,
     novelty: 0.5,
     freshness: 0.5,
+  };
+}
+
+/**
+ * Rebuild a candidate from a stored reservoir entry — no detail
+ * fetch (the entry carries the snapshot; see the reservoir note in
+ * util.ts). Genre names re-derive from ids so the UI language is
+ * always current. Anchors and retrieval boosts recompute downstream.
+ */
+function candidateFromEntry(entry: ReservoirEntry, genreMap: Map<number, string>): Candidate {
+  return {
+    tmdbId: entry.tmdbId,
+    title: entry.title,
+    originalTitle: entry.originalTitle,
+    originalLanguage: entry.originalLanguage,
+    originCountry: [...entry.originCountry],
+    genreIds: [...entry.genreIds],
+    genreNames: entry.genreIds.map((id) => genreMap.get(id) ?? '').filter(Boolean),
+    popularity: entry.popularity,
+    voteAverage: entry.voteAverage,
+    voteCount: entry.voteCount,
+    firstAirDate: entry.firstAirDate,
+    posterPath: entry.posterPath,
+    fromSimilar: false,
+    fromRec: false,
+    retrievalScore: 0,
+    anchorIds: [],
+    anchorTmdbId: null,
+    anchorTitle: null,
+    nearNegative: false,
+    negativeDemotion: 0,
+    novelty: 0.5,
+    freshness: 0.5,
+    detailFacts: { ...entry.detailFacts },
+  };
+}
+
+/** Snapshot a candidate into a reservoir entry for storage. */
+function entryFromCandidate(cand: Candidate, rationale: string, risk: string | null): ReservoirEntry {
+  return {
+    tmdbId: cand.tmdbId,
+    score: cand.retrievalScore,
+    rationale,
+    risk,
+    title: cand.title,
+    originalTitle: cand.originalTitle,
+    originalLanguage: cand.originalLanguage,
+    originCountry: [...cand.originCountry],
+    genreIds: [...cand.genreIds],
+    firstAirDate: cand.firstAirDate,
+    popularity: cand.popularity,
+    voteAverage: cand.voteAverage,
+    voteCount: cand.voteCount,
+    posterPath: cand.posterPath,
+    detailFacts: cand.detailFacts ?? { ...EMPTY_DETAIL_FACTS },
   };
 }
 
@@ -784,9 +853,10 @@ async function removalCheck(
   byId: Map<number, Candidate>,
   negatives: ShowMeta[],
   uiLang: string,
+  checkSize: number = REMOVAL_CHECK_SIZE,
 ): Promise<Set<number>> {
   if (negatives.length === 0 || ordered.length === 0) return new Set();
-  const checkSet = ordered.slice(0, REMOVAL_CHECK_SIZE);
+  const checkSet = ordered.slice(0, checkSize);
   const validIds = new Set(checkSet.map((e) => e.tmdbId));
   try {
     const provider = getRankLlmProvider(c.env);
@@ -814,6 +884,70 @@ async function removalCheck(
   }
 }
 
+/** Enrich one ranked entry into a display item (rank assigned by the caller). Null on fetch failure. */
+async function enrichOne(
+  c: Context<{ Bindings: Env }>,
+  entry: RankedEntry,
+  ctx: ProfileContext,
+  uiLang: string,
+): Promise<ListItemOut | null> {
+  try {
+    const detail = await getShowDetailCached(c, entry.tmdbId, uiLang);
+    const override = ctx.overrides.get(entry.tmdbId) ?? null;
+    const show = resolveDetail(
+      detail,
+      override
+        ? {
+            he_title: override.heTitle,
+            he_overview: override.heOverview,
+            origin_label: override.originLabel,
+            providers_note: override.providersNote,
+          }
+        : null,
+      uiLang,
+      [],
+    );
+    const episodeMinutes = show.episodeRunTime?.[0] ?? 0;
+    const seasons = show.numberOfSeasons ?? 0;
+    const totalHours =
+      show.numberOfEpisodes != null && episodeMinutes > 0
+        ? Math.round((show.numberOfEpisodes * episodeMinutes) / 60)
+        : 0;
+    const yearOf = (date: string): number | null => {
+      const year = Number(date.slice(0, 4));
+      return Number.isInteger(year) && year > 0 ? year : null;
+    };
+    return {
+      rank: 0,
+      tmdbId: show.tmdbId,
+      title: show.title,
+      originalTitle: show.originalTitle,
+      voteAverage: show.voteAverage,
+      type: classifyType(show.genreIds, show.numberOfSeasons, show.numberOfEpisodes, show.status),
+      genres: show.genres,
+      tone: toneFor(show.genreIds),
+      pace: paceFor(episodeMinutes || null),
+      structure: structureFor(show.genreIds),
+      episodeMinutes,
+      seasons,
+      episodes: show.numberOfEpisodes ?? 0,
+      firstYear: yearOf(show.firstAirDate),
+      lastYear: yearOf(show.lastAirDate),
+      totalHours,
+      language: LANGUAGE_NAMES[show.originalLanguage] ?? show.originalLanguage,
+      country: show.originCountry[0] ?? '',
+      status: show.status === 'Returning Series' || show.status === 'In Production' ? 'ongoing' : 'ended',
+      rationale: entry.rationale,
+      risk: entry.risk,
+      posterPath: show.posterPath,
+    };
+  } catch (err) {
+    console.error(`enrichment failed for ${entry.tmdbId}`, err);
+    // A failed detail fetch drops the show rather than inventing data.
+    return null;
+  }
+}
+
 async function enrichToListItems(
   c: Context<{ Bindings: Env }>,
   ranked: RankedEntry[],
@@ -822,64 +956,71 @@ async function enrichToListItems(
 ): Promise<ListItemOut[]> {
   const items: ListItemOut[] = [];
   const top = ranked.slice(0, TOP_N);
-  for (let i = 0; i < top.length; i++) {
-    const entry = top[i];
-    try {
-      const detail = await getShowDetailCached(c, entry.tmdbId, uiLang);
-      const override = ctx.overrides.get(entry.tmdbId) ?? null;
-      const show = resolveDetail(
-        detail,
-        override
-          ? {
-              he_title: override.heTitle,
-              he_overview: override.heOverview,
-              origin_label: override.originLabel,
-              providers_note: override.providersNote,
-            }
-          : null,
-        uiLang,
-        [],
-      );
-      const episodeMinutes = show.episodeRunTime?.[0] ?? 0;
-      const seasons = show.numberOfSeasons ?? 0;
-      const totalHours =
-        show.numberOfEpisodes != null && episodeMinutes > 0
-          ? Math.round((show.numberOfEpisodes * episodeMinutes) / 60)
-          : 0;
-      const yearOf = (date: string): number | null => {
-        const year = Number(date.slice(0, 4));
-        return Number.isInteger(year) && year > 0 ? year : null;
-      };
-      items.push({
-        rank: i + 1,
-        tmdbId: show.tmdbId,
-        title: show.title,
-        originalTitle: show.originalTitle,
-        voteAverage: show.voteAverage,
-        type: classifyType(show.genreIds, show.numberOfSeasons, show.numberOfEpisodes, show.status),
-        genres: show.genres,
-        tone: toneFor(show.genreIds),
-        pace: paceFor(episodeMinutes || null),
-        structure: structureFor(show.genreIds),
-        episodeMinutes,
-        seasons,
-        episodes: show.numberOfEpisodes ?? 0,
-        firstYear: yearOf(show.firstAirDate),
-        lastYear: yearOf(show.lastAirDate),
-        totalHours,
-        language: LANGUAGE_NAMES[show.originalLanguage] ?? show.originalLanguage,
-        country: show.originCountry[0] ?? '',
-        status: show.status === 'Returning Series' || show.status === 'In Production' ? 'ongoing' : 'ended',
-        rationale: entry.rationale,
-        risk: entry.risk,
-        posterPath: show.posterPath,
-      });
-    } catch (err) {
-      console.error(`enrichment failed for ${entry.tmdbId}`, err);
-      // A failed detail fetch drops the show rather than inventing data.
-    }
+  for (const entry of top) {
+    const item = await enrichOne(c, entry, ctx, uiLang);
+    if (item) items.push(item);
   }
   // Re-rank after drops so ranks stay dense.
+  items.forEach((item, i) => {
+    item.rank = i + 1;
+  });
+  return items;
+}
+
+/**
+ * Refill a short snapshot from the reservoir (read path, no LLM):
+ * after a rating/deny prunes the snapshot, the next reservoir entries
+ * promote into view. Each promoted entry is re-checked against the
+ * CURRENT hard rules with FRESH cached details before it can
+ * surface — stored facts can go stale (a show's status or season
+ * count changes), and the tail never passed the pool-stage filter.
+ * Rated/denied/excluded and off-language entries are skipped, never
+ * promoted. Returns the merged snapshot with dense ranks.
+ */
+export async function refillSnapshot(
+  c: Context<{ Bindings: Env }>,
+  snapshot: ListItemOut[],
+  pool: ReservoirEntry[],
+  ctx: ProfileContext,
+  uiLang: string,
+): Promise<ListItemOut[]> {
+  if (snapshot.length >= TOP_N) return snapshot;
+  const languages = ctx.profile.languages;
+  const excluded = new Set<number>([...ctx.ratedIds, ...ctx.denyIds, ...ctx.excludedIds]);
+  const present = new Set(snapshot.map((item) => item.tmdbId));
+  const items = [...snapshot];
+  for (const entry of pool) {
+    if (items.length >= TOP_N) break;
+    if (present.has(entry.tmdbId) || excluded.has(entry.tmdbId) || isBlockedId(entry.tmdbId)) continue;
+    if (languages.length > 0 && !languages.includes(entry.originalLanguage)) continue;
+    let detail;
+    try {
+      detail = await getShowDetailCached(c, entry.tmdbId, uiLang);
+    } catch {
+      continue;
+    }
+    const resolved = resolveDetail(detail, null, uiLang, []);
+    const year = Number(detail.first_air_date ? detail.first_air_date.slice(0, 4) : NaN);
+    const facts: ShowFacts = {
+      genreIds: (detail.genres ?? []).map((g) => g.id),
+      year: Number.isInteger(year) ? year : null,
+      originCountry: detail.origin_country ?? [],
+      status: resolved.status,
+      seasons: resolved.numberOfSeasons,
+      episodeMinutes: resolved.episodeRunTime?.[0] ?? null,
+    };
+    if (!passesHardRules(facts, ctx.rules)) continue;
+    const item = await enrichOne(
+      c,
+      { tmdbId: entry.tmdbId, rationale: entry.rationale, risk: entry.risk },
+      ctx,
+      uiLang,
+    );
+    if (item) {
+      present.add(entry.tmdbId);
+      items.push(item);
+    }
+  }
   items.forEach((item, i) => {
     item.rank = i + 1;
   });
@@ -895,11 +1036,27 @@ function emptyList(shortReason: string | null): GeneratedList {
  * TmdbNotConfiguredError / TmdbApiError) and a non-empty feedback log;
  * with no feedback at all the lists stay empty with a reason, because
  * there is nothing to rank against.
+ *
+ * Reservoir-aware: `prev` carries the stored reservoirs (empty on
+ * first generation, or after a legacy pool row). Each kind
+ * independently prunes its survivors (rated/denied/excluded/blocked,
+ * off-language, or failing a hard rule on stored facts), then picks
+ * a path by survivor count — rebuild (10 or fewer: survivors
+ * discarded, fresh pipeline only), top-up (under 30: a fresh batch
+ * refills toward the reservoir size), or re-rank (30+: survivors +
+ * a small fresh batch, so the reservoir cannot fossilize). Survivors
+ * and fresh candidates merge into one deterministically scored pool;
+ * the LLM listwise-ranks a 30-show working set per kind exactly as
+ * before, and the reservoir keeps the greedy order + cap-deferred
+ * remainder + deterministic tail, capped at 50. The removal check
+ * covers the whole reservoir, so every stored show is vetted before
+ * it can promote into view.
  */
 export async function generateLists(
   c: Context<{ Bindings: Env }>,
   ctx: ProfileContext,
   uiLang: string,
+  prev?: { casual: ReservoirEntry[]; deep: ReservoirEntry[] },
 ): Promise<GeneratedLists> {
   const now = Date.now();
   if (ctx.showFeedback.length === 0) {
@@ -910,7 +1067,48 @@ export async function generateLists(
     return { casual: emptyList(reason), deep: emptyList(reason) };
   }
 
-  const candidates = await retrieveCandidates(c, ctx, uiLang);
+  // --- prune the stored reservoirs ----------------------------------
+  // Stored facts decide here (no fetches — see the reservoir note in
+  // util.ts); detail facts refresh at the pool stage for ranked
+  // shows, and promotion re-checks with fresh details.
+  const languages = ctx.profile.languages;
+  const excludedIds = new Set<number>([...ctx.ratedIds, ...ctx.denyIds, ...ctx.excludedIds]);
+  const pruneReservoir = (entries: ReservoirEntry[]): ReservoirEntry[] =>
+    entries.filter((entry) => {
+      if (excludedIds.has(entry.tmdbId) || isBlockedId(entry.tmdbId)) return false;
+      if (languages.length > 0 && !languages.includes(entry.originalLanguage)) return false;
+      return passesHardRules(reservoirEntryFacts(entry), ctx.rules);
+    });
+  const casualSurvivors = pruneReservoir(prev?.casual ?? []);
+  const deepSurvivors = pruneReservoir(prev?.deep ?? []);
+  const casualPath = reservoirPath(casualSurvivors.length);
+  const deepPath = reservoirPath(deepSurvivors.length);
+  const survivorById = new Map<number, ReservoirEntry>();
+  for (const entry of [...casualSurvivors, ...deepSurvivors]) {
+    if (!survivorById.has(entry.tmdbId)) survivorById.set(entry.tmdbId, entry);
+  }
+  // Rebuild discards survivors; the other paths carry them. A show
+  // stored in both reservoirs is carried when either kind carries it.
+  const carriedIds = new Set<number>();
+  if (casualPath !== 'rebuild') for (const e of casualSurvivors) carriedIds.add(e.tmdbId);
+  if (deepPath !== 'rebuild') for (const e of deepSurvivors) carriedIds.add(e.tmdbId);
+
+  // --- fresh retrieval (shared by both kinds) -----------------------
+  const fresh = await retrieveCandidates(c, ctx, uiLang);
+  const genreMap = await getGenreMap(c, uiLang).catch(() => new Map<number, string>());
+
+  // Survivors re-enter as candidates from their stored snapshot. A
+  // show retrieval also found keeps the FRESH candidate (current
+  // TMDB data); its stored rationale stays available for the tail.
+  const freshById = new Map(fresh.map((cand) => [cand.tmdbId, cand]));
+  const candidates: Candidate[] = [...fresh];
+  for (const id of carriedIds) {
+    if (freshById.has(id)) continue;
+    const entry = survivorById.get(id);
+    if (entry) candidates.push(candidateFromEntry(entry, genreMap));
+  }
+  const survivorIds = new Set<number>(carriedIds);
+
   const tasteText = tasteTextForRanking(ctx);
   const shortTermText = buildShortTermTasteText(ctx.feedback, now);
 
@@ -948,7 +1146,8 @@ export async function generateLists(
   );
 
   // Retrieval-layer negative exclusion (layer a): near-duplicates of
-  // denied/disliked shows never reach the rank pools.
+  // denied/disliked shows never reach the rank pools — survivors
+  // included, so a new dislike evicts its look-alikes.
   const surviving = candidates.filter((cand) => !cand.nearNegative);
   assignAnchors(surviving, likedMeta, ctx);
   for (const cand of surviving) cand.freshness = freshnessFor(cand.firstAirDate, now);
@@ -961,6 +1160,25 @@ export async function generateLists(
   const deepPrimary = surviving
     .filter((cand) => classifyKind(cand.genreIds) === 'deep')
     .sort(byScore);
+
+  // Per-kind merge: survivors + fresh batch. Rebuild takes fresh
+  // only; top-up refills toward the reservoir size; re-rank mixes a
+  // small fresh batch so new shows keep arriving.
+  const mergeKind = (
+    primary: Candidate[],
+    path: 'rebuild' | 'topup' | 'rerank',
+  ): Candidate[] => {
+    if (path === 'rebuild') return primary.filter((cand) => !survivorIds.has(cand.tmdbId));
+    const kept = primary.filter((cand) => survivorIds.has(cand.tmdbId));
+    const freshOnly = primary.filter((cand) => !survivorIds.has(cand.tmdbId));
+    const batch =
+      path === 'topup'
+        ? Math.max(0, RESERVOIR_SIZE - kept.length)
+        : RESERVOIR_FRESH_BATCH;
+    return [...kept, ...freshOnly.slice(0, batch)].sort(byScore);
+  };
+  const casualMerged = mergeKind(casualPrimary, casualPath);
+  const deepMerged = mergeKind(deepPrimary, deepPath);
 
   // Rank-pool construction per kind: primaries in retrieval-score order,
   // backfilled from the other bucket's pool when starved (fewer
@@ -995,10 +1213,18 @@ export async function generateLists(
     );
     return { picked: guaranteed, strictIds };
   };
-  const casualBucket = buildRankPool(casualPrimary, deepPrimary);
-  const deepBucket = buildRankPool(deepPrimary, casualPrimary);
+  const casualBucket = buildRankPool(casualMerged, deepMerged);
+  const deepBucket = buildRankPool(deepMerged, casualMerged);
   let casualCands = casualBucket.picked;
   let deepCands = deepBucket.picked;
+  // Tail: merged candidates outside the working set, in score order.
+  // They keep reservoir depth without LLM cost and compete for the
+  // working set on the next regeneration; they never display
+  // directly (the LLM never vetted them).
+  const casualWorkingIds = new Set(casualCands.map((cand) => cand.tmdbId));
+  const deepWorkingIds = new Set(deepCands.map((cand) => cand.tmdbId));
+  const casualTail = casualMerged.filter((cand) => !casualWorkingIds.has(cand.tmdbId));
+  const deepTail = deepMerged.filter((cand) => !deepWorkingIds.has(cand.tmdbId));
 
   // Stage-2 rule filtering + soft-rule facts: detail dimensions
   // (status/seasons/episodeMinutes) need show detail, fetched once
@@ -1043,8 +1269,9 @@ export async function generateLists(
   // Deterministic post-LLM pass (MMR + calibration + epsilon blend +
   // strict caps, one greedy pass — see rerank.deterministicRerank).
   // Fit comes from the merged LLM rank position, minus the layer-(b)
-  // negative demotion. The pass returns the full pool order; the
-  // snapshot slices the Top 10 from it.
+  // negative demotion. The pass returns the greedy order plus the
+  // cap-deferred remainder; the display slice relaxes the cap (see
+  // relaxedDisplay), and the reservoir keeps the full order.
   interface GreedyEntry extends RerankCandidate {
     entry: RankedEntry;
   }
@@ -1068,32 +1295,91 @@ export async function generateLists(
   const casualGreedy = deterministicRerank(toGreedy(casualRank.ranked, casualCands), 'casual', calibrationTarget, TOP_CLUSTER_CAP);
   const deepGreedy = deterministicRerank(toGreedy(deepRank.ranked, deepCands), 'deep', calibrationTarget, TOP_CLUSTER_CAP);
 
-  // Final negative layer (c): removal-only LLM check over each
-  // shortlist head. Removals cannot violate the caps (removal only
-  // shrinks clusters), and promotion headroom was checked too.
-  const casualById = new Map(casualCands.map((cand) => [cand.tmdbId, cand]));
-  const deepById = new Map(deepCands.map((cand) => [cand.tmdbId, cand]));
+  // Reservoir assembly: greedy order ++ cap-deferred remainder ++
+  // deterministic tail, deduped and capped. Ranked entries carry
+  // their LLM/template rationale; tail survivors keep their stored
+  // rationale, tail fresh shows get a template rationale.
+  const assemble = (
+    greedy: { ordered: GreedyEntry[]; deferred: GreedyEntry[] },
+    tail: Candidate[],
+    pool: Candidate[],
+  ): { ordered: RankedEntry[]; deferred: RankedEntry[]; reservoir: ReservoirEntry[] } => {
+    const byId = new Map(pool.map((cand) => [cand.tmdbId, cand]));
+    const ordered = greedy.ordered.map((g) => g.entry);
+    const deferred = greedy.deferred.map((g) => g.entry);
+    const rankedOrder = [...ordered, ...deferred];
+    const seen = new Set<number>();
+    const reservoir: ReservoirEntry[] = [];
+    for (const entry of rankedOrder) {
+      if (seen.has(entry.tmdbId) || reservoir.length >= RESERVOIR_SIZE) continue;
+      const cand = byId.get(entry.tmdbId);
+      if (!cand) continue;
+      seen.add(entry.tmdbId);
+      reservoir.push(entryFromCandidate(cand, entry.rationale, entry.risk));
+    }
+    for (const cand of tail) {
+      if (seen.has(cand.tmdbId) || reservoir.length >= RESERVOIR_SIZE) continue;
+      seen.add(cand.tmdbId);
+      const stored = survivorById.get(cand.tmdbId);
+      const rationale =
+        stored && stored.rationale
+          ? stored.rationale
+          : groundRationale(
+              '',
+              cand.anchorTitle,
+              cand.genreNames,
+              cand.firstAirDate ? cand.firstAirDate.slice(0, 4) : '',
+              uiLang,
+            );
+      reservoir.push(entryFromCandidate(cand, rationale, stored?.risk ?? null));
+    }
+    return { ordered, deferred, reservoir };
+  };
+  const casualAssembled = assemble(casualGreedy, casualTail, casualCands);
+  const deepAssembled = assemble(deepGreedy, deepTail, deepCands);
+
+  // Final negative layer (c): removal-only LLM check over the WHOLE
+  // reservoir order, so every stored show is vetted before it can
+  // promote into view. Removals cannot violate the caps (removal
+  // only shrinks clusters). Display backfills from the ranked order
+  // after removals — the tail never displays directly.
+  const casualById = new Map([...casualCands, ...casualTail].map((cand) => [cand.tmdbId, cand]));
+  const deepById = new Map([...deepCands, ...deepTail].map((cand) => [cand.tmdbId, cand]));
+  const toRanked = (res: ReservoirEntry[]): RankedEntry[] =>
+    res.map((e) => ({ tmdbId: e.tmdbId, rationale: e.rationale, risk: e.risk }));
   const [casualRemoved, deepRemoved] = await Promise.all([
-    removalCheck(c, casualGreedy.ordered.map((g) => g.entry), casualById, exclusionMeta, uiLang),
-    removalCheck(c, deepGreedy.ordered.map((g) => g.entry), deepById, exclusionMeta, uiLang),
+    removalCheck(c, toRanked(casualAssembled.reservoir), casualById, exclusionMeta, uiLang, RESERVOIR_SIZE),
+    removalCheck(c, toRanked(deepAssembled.reservoir), deepById, exclusionMeta, uiLang, RESERVOIR_SIZE),
   ]);
-  const casualRanked = casualGreedy.ordered
-    .filter((g) => !casualRemoved.has(g.tmdbId))
-    .map((g) => g.entry);
-  const deepRanked = deepGreedy.ordered
-    .filter((g) => !deepRemoved.has(g.tmdbId))
-    .map((g) => g.entry);
+  const casualReservoir = casualAssembled.reservoir.filter((e) => !casualRemoved.has(e.tmdbId));
+  const deepReservoir = deepAssembled.reservoir.filter((e) => !deepRemoved.has(e.tmdbId));
+  // Display: strict greedy head first, cap-deferred remainder filling
+  // leftover slots (narrow-pool relaxation) — after removals, so a
+  // removed show's slot backfills from the ranked order. The tail
+  // never displays directly.
+  const casualDisplay = relaxedDisplay(
+    casualAssembled.ordered.filter((e) => !casualRemoved.has(e.tmdbId)),
+    casualAssembled.deferred.filter((e) => !casualRemoved.has(e.tmdbId)),
+    TOP_N,
+  );
+  const deepDisplay = relaxedDisplay(
+    deepAssembled.ordered.filter((e) => !deepRemoved.has(e.tmdbId)),
+    deepAssembled.deferred.filter((e) => !deepRemoved.has(e.tmdbId)),
+    TOP_N,
+  );
 
   const [casualItems, deepItems] = await Promise.all([
-    enrichToListItems(c, casualRanked, ctx, uiLang),
-    enrichToListItems(c, deepRanked, ctx, uiLang),
+    enrichToListItems(c, casualDisplay, ctx, uiLang),
+    enrichToListItems(c, deepDisplay, ctx, uiLang),
   ]);
 
+  // The cap no longer shortens the display (relaxedDisplay fills
+  // leftover slots from the cap-deferred remainder), so a short list
+  // means the ranked pool itself held fewer than 10.
   const shortReasonFor = (
     items: ListItemOut[],
     poolSize: number,
     llmReason: string | null,
-    capBound: boolean,
   ): string | null => {
     if (items.length >= TOP_N) return null;
     // The re-rank's own reason, when it ranked fewer than 10, is the
@@ -1104,12 +1390,6 @@ export async function generateLists(
         ? 'לא נמצאו סדרות מתאימות לשפות של הפרופיל.'
         : 'No shows qualified for this profile’s languages.';
     }
-    // The strict variety cap held back relevant same-type shows.
-    if (capBound) {
-      return uiLang === 'he'
-        ? 'פחות מ־10: מגבלת הגיוון מגבילה סדרות מאותו סוג.'
-        : 'Fewer than 10: the variety cap limits shows of the same type.';
-    }
     return uiLang === 'he'
       ? `רק ${items.length} סדרות מתאימות כרגע.`
       : `Only ${items.length} shows qualify right now.`;
@@ -1117,21 +1397,15 @@ export async function generateLists(
 
   return {
     casual: {
-      pool: casualRanked.map((r) => ({
-        tmdbId: r.tmdbId,
-        score: casualCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
-      })),
+      pool: casualReservoir,
       snapshot: casualItems,
-      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason, casualGreedy.capBound),
+      shortReason: shortReasonFor(casualItems, casualCands.length, casualRank.shortReason),
       updatedAt: now,
     },
     deep: {
-      pool: deepRanked.map((r) => ({
-        tmdbId: r.tmdbId,
-        score: deepCands.find((cand) => cand.tmdbId === r.tmdbId)?.retrievalScore ?? 0,
-      })),
+      pool: deepReservoir,
       snapshot: deepItems,
-      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason, deepGreedy.capBound),
+      shortReason: shortReasonFor(deepItems, deepCands.length, deepRank.shortReason),
       updatedAt: now,
     },
   };

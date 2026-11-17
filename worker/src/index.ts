@@ -41,19 +41,29 @@ import {
   loadStoredLists,
   loadTasteRecord,
   matchFeedbackForShow,
+  pruneStoredLists,
   saveStoredList,
   saveTasteRecord,
   updateProfile,
   type BootstrapStatus,
 } from './db';
-import { generateAdhocPick, generateLists, type GeneratedLists } from './engine';
+import {
+  generateAdhocPick,
+  generateLists,
+  refillSnapshot,
+  type GeneratedLists,
+  type ListItemOut,
+} from './engine';
 import { loadKnownNames, recomputePeopleScores } from './trust';
 import {
   combineTasteSections,
   detectLanguageConflict,
   groundRules,
   parseConsolidationResponse,
+  parseReservoirEntries,
   parseTasteSummary,
+  serializeReservoirEntries,
+  tasteRecordsEqual,
   TMDB_TV_GENRES,
   type Contradiction,
   type PreferenceRule,
@@ -415,18 +425,98 @@ async function listsResponse(
 ) {
   const db = c.env.DB!;
   const stored = await loadStoredLists(db, profileId);
-  if (!forceRefresh && stored.casual && stored.deep) {
-    return {
-      stub: false,
-      stale: false,
-      profileId,
-      updatedAt: new Date(Math.max(stored.casual.updatedAt, stored.deep.updatedAt)).toISOString(),
-      casual: JSON.parse(stored.casual.snapshotJson) as unknown[],
-      deep: JSON.parse(stored.deep.snapshotJson) as unknown[],
-      shortReason: stored.casual.shortReason ?? stored.deep.shortReason,
-      casualShortReason: stored.casual.shortReason,
-      deepShortReason: stored.deep.shortReason,
-    };
+  const parseSnapshot = (json: string): ListItemOut[] => {
+    try {
+      const parsed: unknown = JSON.parse(json);
+      return Array.isArray(parsed) ? (parsed as ListItemOut[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  const casualItems = stored.casual ? parseSnapshot(stored.casual.snapshotJson) : [];
+  const deepItems = stored.deep ? parseSnapshot(stored.deep.snapshotJson) : [];
+  const storedResponse = (
+    casual: ListItemOut[],
+    deep: ListItemOut[],
+    stale: boolean,
+    casualReason: string | null,
+    deepReason: string | null,
+  ) => ({
+    stub: false,
+    stale,
+    profileId,
+    updatedAt:
+      stored.casual && stored.deep
+        ? new Date(Math.max(stored.casual.updatedAt, stored.deep.updatedAt)).toISOString()
+        : null,
+    casual,
+    deep,
+    shortReason: casualReason ?? deepReason,
+    casualShortReason: casualReason,
+    deepShortReason: deepReason,
+  });
+  // Fast path: both snapshots stored (the empty-string sentinel means
+  // invalidated — regenerate below). A short snapshot refills from
+  // its reservoir (promotion, no LLM) instead of regenerating; a
+  // stored empty array means genuinely empty and is served as-is.
+  const snapshotsStored =
+    stored.casual != null &&
+    stored.deep != null &&
+    stored.casual.snapshotJson !== '' &&
+    stored.deep.snapshotJson !== '';
+  if (!forceRefresh && snapshotsStored) {
+    let casual = casualItems;
+    let deep = deepItems;
+    let casualReason = stored.casual?.shortReason ?? null;
+    let deepReason = stored.deep?.shortReason ?? null;
+    if (casual.length < 10 || deep.length < 10) {
+      const ctx = await loadProfileContext(db, profileId, uiLang);
+      if (ctx) {
+        if (casual.length < 10 && stored.casual) {
+          const refilled = await refillSnapshot(
+            c,
+            casual,
+            parseReservoirEntries(stored.casual.poolJson),
+            ctx,
+            uiLang,
+          );
+          if (refilled.length !== casual.length) {
+            casual = refilled;
+            casualReason = casual.length >= 10 ? null : casualReason;
+            await saveStoredList(
+              db,
+              profileId,
+              'casual',
+              stored.casual.poolJson,
+              JSON.stringify(casual),
+              casualReason,
+            );
+          }
+        }
+        if (deep.length < 10 && stored.deep) {
+          const refilled = await refillSnapshot(
+            c,
+            deep,
+            parseReservoirEntries(stored.deep.poolJson),
+            ctx,
+            uiLang,
+          );
+          if (refilled.length !== deep.length) {
+            deep = refilled;
+            deepReason = deep.length >= 10 ? null : deepReason;
+            await saveStoredList(
+              db,
+              profileId,
+              'deep',
+              stored.deep.poolJson,
+              JSON.stringify(deep),
+              deepReason,
+            );
+          }
+        }
+      }
+    }
+    return storedResponse(casual, deep, false, casualReason, deepReason);
   }
   const ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) {
@@ -448,29 +538,32 @@ async function listsResponse(
       deepShortReason: null,
     };
   }
+  // Regenerate WITH the stored reservoirs (empty on first build, or
+  // after a legacy pool row): prune + re-rank instead of rebuild.
+  const prev = {
+    casual: parseReservoirEntries(stored.casual?.poolJson),
+    deep: parseReservoirEntries(stored.deep?.poolJson),
+  };
   let generated: GeneratedLists;
   try {
-    generated = await generateLists(c, ctx, uiLang);
+    generated = await generateLists(c, ctx, uiLang, prev);
   } catch (err) {
-    // On engine failure, serve the last snapshot as stale rather than
-    // failing outright — but never serve stale data as fresh.
-    if (stored.casual && stored.deep) {
-      return {
-        stub: false,
-        stale: true,
-        profileId,
-        updatedAt: new Date(Math.max(stored.casual.updatedAt, stored.deep.updatedAt)).toISOString(),
-        casual: JSON.parse(stored.casual.snapshotJson) as unknown[],
-        deep: JSON.parse(stored.deep.snapshotJson) as unknown[],
-        shortReason: stored.casual.shortReason ?? stored.deep.shortReason,
-        casualShortReason: stored.casual.shortReason,
-        deepShortReason: stored.deep.shortReason,
-      };
+    // On engine failure, serve the last snapshots as stale rather than
+    // failing outright — but never serve stale data as fresh, and
+    // never serve cleared (invalidated) or empty snapshots as content.
+    if (casualItems.length > 0 && deepItems.length > 0) {
+      return storedResponse(
+        casualItems,
+        deepItems,
+        true,
+        stored.casual?.shortReason ?? null,
+        stored.deep?.shortReason ?? null,
+      );
     }
     throw err;
   }
-  await saveStoredList(db, profileId, 'casual', JSON.stringify(generated.casual.pool), JSON.stringify(generated.casual.snapshot), generated.casual.shortReason);
-  await saveStoredList(db, profileId, 'deep', JSON.stringify(generated.deep.pool), JSON.stringify(generated.deep.snapshot), generated.deep.shortReason);
+  await saveStoredList(db, profileId, 'casual', serializeReservoirEntries(generated.casual.pool), JSON.stringify(generated.casual.snapshot), generated.casual.shortReason);
+  await saveStoredList(db, profileId, 'deep', serializeReservoirEntries(generated.deep.pool), JSON.stringify(generated.deep.snapshot), generated.deep.shortReason);
   return {
     stub: false,
     stale: false,
@@ -525,7 +618,9 @@ app.post('/api/lists/refresh', async (c: Ctx) => {
 // ---------------------------------------------------------------- feedback
 // Rating a show removes it from both lists (spec §7, build rule 13) —
 // the frontend applies that immediately; the server records the
-// feedback, recomputes people trust, and invalidates the lists.
+// feedback, recomputes people trust, and prunes the show from the
+// stored reservoirs/snapshots (the snapshot refills from the
+// reservoir on read — no regeneration, no churn).
 
 // Show-feedback history, newest first. Lets the picker mark already-rated
 // shows and lets onboarding resume with its real progress.
@@ -579,7 +674,7 @@ app.post('/api/feedback', async (c: Ctx) => {
     String(reason ?? ''),
     typeof originalLanguage === 'string' ? originalLanguage : null,
   );
-  await invalidateLists(c.env.DB!, profileId);
+  await pruneStoredLists(c.env.DB!, profileId, tmdbId as number);
   // Trust recompute is best-effort: feedback must not fail because of it.
   try {
     await recomputePeopleScores(c.env.DB!, profileId);
@@ -604,7 +699,7 @@ app.post('/api/deny', async (c: Ctx) => {
   }
   await requireProfileAccess(c, profileId);
   await insertDeny(c.env.DB!, profileId, tmdbId as number);
-  await invalidateLists(c.env.DB!, profileId);
+  await pruneStoredLists(c.env.DB!, profileId, tmdbId as number);
   return c.json({ ok: true });
 });
 
@@ -626,9 +721,10 @@ app.post('/api/notes', async (c: Ctx) => {
   }
   await requireProfileAccess(c, profileId);
   await insertNote(c.env.DB!, profileId, noteKind as 'like' | 'dislike' | 'note', String(text).trim());
-  await invalidateLists(c.env.DB!, profileId);
-  // Event-driven consolidation (background): the living summary follows
-  // new notes, same as feedback.
+  // No list action here: the background consolidation invalidates
+  // (snapshots cleared, reservoirs kept) only when it actually
+  // changes the taste record — a note that changes nothing costs no
+  // regeneration.
   const profile = await loadProfile(c.env.DB!, profileId);
   if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
   return c.json({ ok: true });
@@ -736,11 +832,16 @@ async function consolidateFromLog(
       .bind(profileId)
       .first<{ m: number | null }>();
     if ((latest?.m ?? 0) <= snapshotMaxCreatedAt) {
-      await saveTasteRecord(db, profileId, uiLang, {
-        sections: parsed.sections,
-        rules,
-      });
-      await invalidateLists(db, profileId);
+      // No-op guard: a consolidation that reproduces the stored
+      // record (sections trimmed, rules as a set) changes nothing —
+      // skip the save AND the invalidation, so a rating whose taste
+      // already says the same thing costs no regeneration.
+      const next = { sections: parsed.sections, rules };
+      const current = { sections: ctx.tasteSections, rules: ctx.rules };
+      if (!tasteRecordsEqual(next, current)) {
+        await saveTasteRecord(db, profileId, uiLang, next);
+        await invalidateLists(db, profileId);
+      }
     }
   }
   return {

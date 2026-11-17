@@ -1423,3 +1423,164 @@ export function detectLanguageConflict(
   }
   return null;
 }
+
+// ---------------------------------------------------------------- recommendation reservoir
+//
+// Stability design (2026-11-17): each list keeps a persistent ranked
+// reservoir of up to RESERVOIR_SIZE shows in recommendation_lists'
+// pool_json, and displays only the top 10. Regeneration re-ranks the
+// reservoir instead of rebuilding from zero, so a refresh keeps good
+// shows instead of churning them; rating a show drops it from the
+// reservoir and the next entry promotes. The reservoir entry carries
+// a self-describing candidate snapshot — title, genres, language,
+// country, year, popularity/votes, and detail facts — so survivors
+// re-enter the pipeline WITHOUT a TMDB detail fetch each (100
+// survivors would blow the 50-subrequest budget on a cold cache).
+// Genre NAMES are re-derived from genreIds at load (correct UI
+// language always); anchors and retrieval boosts are recomputed.
+// Detail facts can go stale for ongoing shows; the pool-stage
+// enrichment refreshes them for ranked shows, and promotion
+// re-checks hard rules with fresh details before a tail show can
+// surface — stored facts are never the last word before display.
+
+/** Max shows kept per kind in the reservoir. */
+export const RESERVOIR_SIZE = 50;
+/** Below this many survivors, pull a top-up batch to refill to RESERVOIR_SIZE. */
+export const RESERVOIR_TOPUP_THRESHOLD = 30;
+/** At or below this many survivors, discard the reservoir and rebuild from scratch. */
+export const RESERVOIR_REBUILD_THRESHOLD = 10;
+/** Fresh shows mixed into every re-rank so the reservoir cannot fossilize. */
+export const RESERVOIR_FRESH_BATCH = 10;
+
+export interface ReservoirEntry {
+  tmdbId: number;
+  /** Last ordering score (informational — stored order is authoritative). */
+  score: number;
+  /** Last rationale (LLM or template), reused when the show promotes. */
+  rationale: string;
+  risk: string | null;
+  title: string;
+  originalTitle: string;
+  originalLanguage: string;
+  originCountry: string[];
+  genreIds: number[];
+  firstAirDate: string;
+  popularity: number;
+  voteAverage: number;
+  voteCount: number;
+  posterPath: string | null;
+  detailFacts: ShowDetailFacts;
+}
+
+function asDetailFacts(value: unknown): ShowDetailFacts {
+  if (!value || typeof value !== 'object') return { ...EMPTY_DETAIL_FACTS };
+  const v = value as Record<string, unknown>;
+  return {
+    status: typeof v['status'] === 'string' ? v['status'] : null,
+    seasons: Number.isInteger(v['seasons']) ? (v['seasons'] as number) : null,
+    episodeMinutes: Number.isInteger(v['episodeMinutes']) ? (v['episodeMinutes'] as number) : null,
+  };
+}
+
+/**
+ * Parse stored reservoir JSON. Tolerant: malformed entries are
+ * dropped, duplicates collapse (first wins), output caps at
+ * RESERVOIR_SIZE. Legacy pool rows ({tmdbId, score} only, written
+ * before the reservoir) lack the candidate snapshot and drop out —
+ * their lists rebuild from scratch on the next regeneration, which
+ * is the correct migration. Never throws.
+ */
+export function parseReservoirEntries(text: string | null | undefined): ReservoirEntry[] {
+  if (!text) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const seen = new Set<number>();
+  const out: ReservoirEntry[] = [];
+  for (const raw of parsed) {
+    if (out.length >= RESERVOIR_SIZE) break;
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const tmdbId = r['tmdbId'];
+    const title = r['title'];
+    const genreIds = r['genreIds'];
+    if (!Number.isInteger(tmdbId) || (tmdbId as number) <= 0) continue;
+    if (typeof title !== 'string' || !title) continue;
+    if (!Array.isArray(genreIds) || !genreIds.every((g) => Number.isInteger(g))) continue;
+    if (seen.has(tmdbId as number)) continue;
+    seen.add(tmdbId as number);
+    const score = r['score'];
+    out.push({
+      tmdbId: tmdbId as number,
+      score: typeof score === 'number' && Number.isFinite(score) ? score : 0,
+      rationale: typeof r['rationale'] === 'string' ? r['rationale'] : '',
+      risk: typeof r['risk'] === 'string' ? r['risk'] : null,
+      title,
+      originalTitle: typeof r['originalTitle'] === 'string' ? r['originalTitle'] : title,
+      originalLanguage: typeof r['originalLanguage'] === 'string' ? r['originalLanguage'] : '',
+      originCountry: Array.isArray(r['originCountry'])
+        ? (r['originCountry'] as unknown[]).filter((cc): cc is string => typeof cc === 'string')
+        : [],
+      genreIds: [...(genreIds as number[])],
+      firstAirDate: typeof r['firstAirDate'] === 'string' ? r['firstAirDate'] : '',
+      popularity: typeof r['popularity'] === 'number' && Number.isFinite(r['popularity']) ? r['popularity'] : 0,
+      voteAverage: typeof r['voteAverage'] === 'number' && Number.isFinite(r['voteAverage']) ? r['voteAverage'] : 0,
+      voteCount: typeof r['voteCount'] === 'number' && Number.isFinite(r['voteCount']) ? r['voteCount'] : 0,
+      posterPath: typeof r['posterPath'] === 'string' ? r['posterPath'] : null,
+      detailFacts: asDetailFacts(r['detailFacts']),
+    });
+  }
+  return out;
+}
+
+export function serializeReservoirEntries(entries: ReservoirEntry[]): string {
+  return JSON.stringify(entries.slice(0, RESERVOIR_SIZE));
+}
+
+/** Rule-matching facts for a stored reservoir entry (no fetch needed). */
+export function reservoirEntryFacts(entry: ReservoirEntry): ShowFacts {
+  const year = entry.firstAirDate ? Number(entry.firstAirDate.slice(0, 4)) : NaN;
+  return {
+    genreIds: entry.genreIds,
+    year: Number.isInteger(year) ? year : null,
+    originCountry: entry.originCountry,
+    status: entry.detailFacts.status,
+    seasons: entry.detailFacts.seasons,
+    episodeMinutes: entry.detailFacts.episodeMinutes,
+  };
+}
+
+/** Which regeneration path a survivor count selects. */
+export function reservoirPath(survivorCount: number): 'rebuild' | 'topup' | 'rerank' {
+  if (survivorCount <= RESERVOIR_REBUILD_THRESHOLD) return 'rebuild';
+  if (survivorCount < RESERVOIR_TOPUP_THRESHOLD) return 'topup';
+  return 'rerank';
+}
+
+function ruleSortKey(rule: PreferenceRule): string {
+  return `${rule.dimension}|${rule.operator}|${String(rule.value)}|${rule.mode}`;
+}
+
+/**
+ * Taste-record equality for the no-op consolidation guard: sections
+ * compared trimmed (storage trims), rules compared as a SET — the
+ * model may emit the same rules in a different order, and that is
+ * not a change worth invalidating lists over.
+ */
+export function tasteRecordsEqual(a: TasteRecord, b: TasteRecord): boolean {
+  if (
+    a.sections.shared.trim() !== b.sections.shared.trim() ||
+    a.sections.casual.trim() !== b.sections.casual.trim() ||
+    a.sections.deep.trim() !== b.sections.deep.trim()
+  ) {
+    return false;
+  }
+  if (a.rules.length !== b.rules.length) return false;
+  const aKeys = a.rules.map(ruleSortKey).sort();
+  const bKeys = b.rules.map(ruleSortKey).sort();
+  return aKeys.every((k, i) => k === bKeys[i]);
+}

@@ -382,12 +382,86 @@ export async function saveTasteRecord(
 }
 
 /**
- * Event-driven invalidation: any feedback, note, recommendation, deny,
- * or language change deletes the stored lists, so the next GET
- * recomputes from the fresh state. Cheap, and impossible to go stale.
+ * Reservoir-aware invalidation: a taste-affecting change (new tip,
+ * manual section edit, language-filter change, consolidation that
+ * actually changed the summary) clears the DISPLAYED snapshots but
+ * KEEPS the stored reservoirs, so the next regeneration re-ranks
+ * known shows instead of rebuilding from zero. The cleared snapshot
+ * is the empty-string sentinel (never a stored value otherwise):
+ * listsResponse regenerates when it sees it, while a stored empty
+ * array means "generated, genuinely empty" and is served as-is.
+ * Ratings and denies do NOT call this — they prune surgically
+ * (pruneStoredLists) and the snapshot refills from the reservoir on
+ * read.
  */
 export async function invalidateLists(db: D1Database, profileId: string): Promise<void> {
-  await db.prepare('DELETE FROM recommendation_lists WHERE profile_id = ?').bind(profileId).run();
+  await db
+    .prepare(
+      `UPDATE recommendation_lists
+       SET snapshot_json = '', short_reason = NULL, updated_at = ?
+       WHERE profile_id = ?`,
+    )
+    .bind(Date.now(), profileId)
+    .run();
+}
+
+/**
+ * Surgical prune: drop one show from both stored reservoirs and both
+ * snapshots (rating / deny). The snapshot refills from the reservoir
+ * on the next read — no regeneration, no churn. Tolerant of
+ * unparseable rows (left untouched). No-op when nothing is stored.
+ */
+export async function pruneStoredLists(
+  db: D1Database,
+  profileId: string,
+  tmdbId: number,
+): Promise<void> {
+  const res = await db
+    .prepare('SELECT kind, pool_json, snapshot_json FROM recommendation_lists WHERE profile_id = ?')
+    .bind(profileId)
+    .all<Record<string, unknown>>();
+  for (const r of res.results ?? []) {
+    const kind = String(r['kind']);
+    let poolJson = String(r['pool_json']);
+    let snapshotJson = String(r['snapshot_json']);
+    let changed = false;
+    try {
+      const pool = JSON.parse(poolJson) as unknown;
+      if (Array.isArray(pool)) {
+        const kept = pool.filter(
+          (e) => !(e && typeof e === 'object' && (e as Record<string, unknown>)['tmdbId'] === tmdbId),
+        );
+        if (kept.length !== pool.length) {
+          poolJson = JSON.stringify(kept);
+          changed = true;
+        }
+      }
+    } catch {
+      // Unparseable pool: leave the row alone.
+    }
+    try {
+      const snap = JSON.parse(snapshotJson) as unknown;
+      if (Array.isArray(snap)) {
+        const kept = snap.filter(
+          (e) => !(e && typeof e === 'object' && (e as Record<string, unknown>)['tmdbId'] === tmdbId),
+        );
+        if (kept.length !== snap.length) {
+          snapshotJson = JSON.stringify(kept);
+          changed = true;
+        }
+      }
+    } catch {
+      // Unparseable snapshot: leave the row alone.
+    }
+    if (changed) {
+      await db
+        .prepare(
+          'UPDATE recommendation_lists SET pool_json = ?, snapshot_json = ? WHERE profile_id = ? AND kind = ?',
+        )
+        .bind(poolJson, snapshotJson, profileId, kind)
+        .run();
+    }
+  }
 }
 
 export interface StoredList {

@@ -259,14 +259,18 @@ function pairSimilarity(a: RerankCandidate, b: RerankCandidate): number {
  * Returns the FULL greedy order (pool order — the caller slices the Top
  * 10). `capBound` is true when the pass stopped with candidates left
  * that were all cap-blocked: the list is short because of the cap, not
- * because the pool ran out. Over-cap candidates never surface.
+ * because the pool ran out. `deferred` carries those cap-blocked
+ * candidates in input order: over-cap candidates never surface in the
+ * strict order, but the caller may relax the cap on a narrow pool by
+ * filling leftover display slots from `deferred` (see relaxedDisplay)
+ * instead of showing a needlessly short list.
  */
 export function deterministicRerank<T extends RerankCandidate>(
   items: T[],
   kind: 'casual' | 'deep',
   target: Map<ClusterKey, number>,
   cap: number,
-): { ordered: T[]; capBound: boolean } {
+): { ordered: T[]; deferred: T[]; capBound: boolean } {
   const weights = RERANK_WEIGHTS[kind];
   const remaining = [...items];
   const ordered: T[] = [];
@@ -306,7 +310,20 @@ export function deterministicRerank<T extends RerankCandidate>(
     clusterCounts.set(picked.cluster, (clusterCounts.get(picked.cluster) ?? 0) + 1);
     remaining.splice(remaining.indexOf(picked), 1);
   }
-  return { ordered, capBound: capBound && remaining.length > 0 };
+  return { ordered, deferred: remaining, capBound: capBound && remaining.length > 0 };
+}
+
+/**
+ * Display slice with narrow-pool cap relaxation: the strict greedy
+ * order first, then cap-blocked candidates in ranked order, but ONLY
+ * to fill slots the strict order leaves empty. When the strict order
+ * already fills `n`, the result is identical to a plain slice — the
+ * cap still binds on wide pools. Mirrors selectCapped's pool-side
+ * relaxation (util.ts), which the final pass previously lacked: a
+ * 2-show list while good same-cluster shows sat cap-blocked.
+ */
+export function relaxedDisplay<T>(ordered: T[], deferred: T[], n: number): T[] {
+  return [...ordered, ...deferred].slice(0, n);
 }
 
 // ---------------------------------------------------------------- negative similarity
