@@ -844,6 +844,20 @@ html[dir="rtl"] .stepper-step { padding: 8px 8px 8px 16px; }
   background: var(--line-strong);
   margin: 0 auto 12px;
 }
+/* Desktop: the manage surface is a centered popup dialog; the
+   bottom-anchored sheet is mobile-only (max-width: 640px). */
+@media (min-width: 641px) {
+  .mood-sheet {
+    top: 50%;
+    bottom: auto;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--line-strong);
+    border-radius: 20px;
+    max-height: calc(100vh - 48px);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  }
+  .mood-sheet-grab { display: none; }
+}
 .mood-sheet h3 { margin: 0 0 4px; }
 .mood-sheet-hint { color: var(--dim); font-size: 0.78rem; margin: 0 0 10px; }
 .mood-srow {
