@@ -51,6 +51,7 @@ import { loadKnownNames, recomputePeopleScores } from './trust';
 import {
   combineTasteSections,
   detectLanguageConflict,
+  groundRules,
   parseConsolidationResponse,
   parseTasteSummary,
   TMDB_TV_GENRES,
@@ -700,6 +701,15 @@ async function consolidateFromLog(
     buildConsolidationPrompt(notes, uiLang, ctx.tasteSections, ctx.profile.languages),
   );
   const parsed = parseConsolidationResponse(raw);
+  // Grounding backstop: drop rules no NOTE names (the model has
+  // invented categories twice), and demote hard rules whose backing
+  // statements carry no categorical wording to soft. Rating lines
+  // never ground a rule — per-show feedback is not a category
+  // statement. Applies to every provider, mock included.
+  const rules = groundRules(
+    parsed.rules,
+    notes.filter((n) => n.source === 'note').map((n) => n.text),
+  );
   // Keyword heuristic supplements the LLM's language-conflict call.
   const heuristic = detectLanguageConflict(
     notes.map((n) => n.text),
@@ -728,7 +738,7 @@ async function consolidateFromLog(
     if ((latest?.m ?? 0) <= snapshotMaxCreatedAt) {
       await saveTasteRecord(db, profileId, uiLang, {
         sections: parsed.sections,
-        rules: parsed.rules,
+        rules,
       });
       await invalidateLists(db, profileId);
     }
@@ -738,7 +748,7 @@ async function consolidateFromLog(
     sections: parsed.sections,
     contradictions: parsed.contradictions.slice(0, 3),
     languageConflict,
-    rules: parsed.rules,
+    rules,
     provider: provider.name,
   };
 }
@@ -911,12 +921,16 @@ app.post('/api/taste/consolidate', async (c: Ctx) => {
       buildConsolidationPrompt(notes, uiLang, parseTasteSummary(STUB_TASTE.summary), STUB_PROFILE.languages),
     );
     const parsed = parseConsolidationResponse(raw);
+    const rules = groundRules(
+      parsed.rules,
+      notes.map((n) => n.text),
+    );
     return c.json({
       summary: parsed.summary,
       sections: parsed.sections,
       contradictions: parsed.contradictions.slice(0, 3),
       languageConflict: parsed.languageConflict,
-      rules: parsed.rules,
+      rules,
       provider: provider.name,
       stub: true,
     });

@@ -419,6 +419,99 @@ const conNoRules = util.parseConsolidationResponse(
 assert.deepEqual(conNoRules.rules, []);
 assert.deepEqual(util.parseConsolidationResponse('Just text.').rules, []);
 
+// --- groundRules: inventions dropped, mild hard rules softened ---
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10767, 'hard')], ['לא אוהב תוכניות ריאליטי']),
+  [], // Talk invented: no note names it
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10762, 'hard')], ['מעדיף לא תוכניות יומיות או תוכניות אקטואליה']),
+  [], // Kids invented: no note names it
+);
+assert.deepEqual(
+  util.groundRules(
+    [R('genre', 'isNot', 10763, 'hard')],
+    ['מעדיף לא תוכניות יומיות או תוכניות אקטואליה'],
+  ),
+  [R('genre', 'isNot', 10763, 'soft')], // grounded via אקטואליה, but "prefers not" is not categorical
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ['לא אוהב תוכניות ריאליטי']),
+  [R('genre', 'isNot', 10764, 'hard')], // categorical wording keeps it hard
+);
+assert.deepEqual(
+  util.groundRules([R('genre', 'isNot', 10764, 'hard')], ['מעדיף לא תוכניות ריאליטי']),
+  [R('genre', 'isNot', 10764, 'soft')], // same category, mild wording only: soft
+);
+assert.deepEqual(
+  util.groundRules(
+    [R('genre', 'isNot', 10764, 'hard')],
+    ['מעדיף לא תוכניות ריאליטי', 'לא אוהב תוכניות ריאליטי'],
+  ),
+  [R('genre', 'isNot', 10764, 'hard')], // any categorical grounding statement keeps it hard
+);
+assert.deepEqual(
+  util.groundRules([R('year', 'gte', 2000, 'hard')], ['Nothing before 2000']),
+  [R('year', 'gte', 2000, 'hard')],
+);
+assert.deepEqual(
+  util.groundRules([R('year', 'gte', 2000, 'hard')], ['Shows from 2000 are nice']),
+  [R('year', 'gte', 2000, 'soft')],
+);
+assert.deepEqual(
+  util.groundRules([R('year', 'gte', 2011, 'soft')], ['I prefer shows after 2010']),
+  [R('year', 'gte', 2011, 'soft')], // +/-1 boundary derivation still grounds
+);
+assert.deepEqual(
+  util.groundRules([R('year', 'lte', 1999, 'hard')], ['Only shows before 2000']),
+  [R('year', 'lte', 1999, 'hard')],
+);
+assert.deepEqual(
+  util.groundRules(
+    [R('year', 'gte', 1990, 'hard'), R('year', 'lte', 1999, 'hard')],
+    ['Only shows from the 90s'],
+  ),
+  [R('year', 'gte', 1990, 'hard'), R('year', 'lte', 1999, 'hard')], // decade wording grounds both bounds
+);
+assert.deepEqual(
+  util.groundRules([R('year', 'gte', 1980, 'hard')], ['Only shows from the 90s']),
+  [], // invented year outside the named decade: dropped
+);
+assert.deepEqual(
+  util.groundRules([R('year', 'gte', 2000, 'hard')], ['משנות ה-2000 ואילך']),
+  [R('year', 'gte', 2000, 'soft')], // Hebrew decade wording grounds; no categorical marker -> soft
+);
+assert.deepEqual(
+  util.groundRules([R('country', 'isNot', 'US', 'hard')], ['No American shows']),
+  [R('country', 'isNot', 'US', 'hard')],
+);
+assert.deepEqual(
+  util.groundRules([R('country', 'is', 'US', 'hard')], ['I love shows because they are great']),
+  [], // 'because' contains 'us' but the bare code needs word boundaries
+);
+assert.deepEqual(
+  util.groundRules([R('status', 'is', 'Ended', 'hard')], ['Only finished shows']),
+  [R('status', 'is', 'Ended', 'hard')],
+);
+assert.deepEqual(
+  util.groundRules([R('seasons', 'gte', 3, 'soft')], ['I like shows with at least 3 seasons']),
+  [R('seasons', 'gte', 3, 'soft')],
+);
+assert.deepEqual(
+  util.groundRules([R('seasons', 'gte', 3, 'hard')], ['I like shows with at least 3 seasons']),
+  [R('seasons', 'gte', 3, 'soft')],
+);
+assert.deepEqual(
+  util.groundRules([R('episodeMinutes', 'lte', 30, 'soft')], ['Episodes under 30 minutes']),
+  [R('episodeMinutes', 'lte', 30, 'soft')],
+);
+assert.deepEqual(util.groundRules([R('genre', 'isNot', 10764, 'hard')], []), []);
+// Cue coverage: every genre id has grounding cues; News covers current-affairs wording.
+for (const g of util.TMDB_TV_GENRES) {
+  assert.ok(util.GENRE_GROUNDING_CUES.some((c) => c.name === g.name && c.words.length > 0));
+}
+assert.ok(util.GENRE_GROUNDING_CUES.find((c) => c.name === 'News').words.includes('אקטואליה'));
+
 assert.equal(
   util.tasteTextForKind({ shared: 's', casual: 'c', deep: 'd' }, 'casual'),
   's\nc',

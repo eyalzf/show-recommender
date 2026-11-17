@@ -1,5 +1,11 @@
 import type { LlmProvider, LlmRequest } from './llm';
-import { TMDB_TV_GENRES, validateRules, type PreferenceRule } from './util';
+import {
+  COUNTRY_GROUNDING_CUES,
+  GENRE_GROUNDING_CUES,
+  TMDB_TV_GENRES,
+  validateRules,
+  type PreferenceRule,
+} from './util';
 
 /**
  * Deterministic mock LLM provider + mock embeddings — the quota-free
@@ -139,36 +145,13 @@ const NEGATED_PREFER_MARKERS = [
   'מעדיף פחות', 'מעדיפה פחות',
 ];
 
-const COUNTRY_CUE_WORDS: Array<{ code: string; words: string[] }> = [
-  { code: 'US', words: ['american', 'אמריקאי', 'אמריקאית'] },
-  { code: 'GB', words: ['british', 'uk ', 'בריטי'] },
-  { code: 'KR', words: ['korean', 'קוריאני'] },
-  { code: 'IL', words: ['israeli', 'ישראלי'] },
-  { code: 'ES', words: ['spanish', 'ספרדי'] },
-  { code: 'FR', words: ['french', 'צרפתי'] },
-  { code: 'DE', words: ['german', 'גרמני'] },
-  { code: 'JP', words: ['japanese', 'יפני'] },
-  { code: 'TR', words: ['turkish', 'טורקי'] },
-];
-
-const GENRE_CUE_WORDS: Array<{ name: string; words: string[] }> = [
-  { name: 'Action & Adventure', words: ['action', 'adventure', 'אקשן', 'הרפתקאות'] },
-  { name: 'Animation', words: ['animation', 'animated', 'אנימציה', 'מצויר'] },
-  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומדיה', 'קומי', 'סיטקום'] },
-  { name: 'Crime', words: ['crime', 'פשע'] },
-  { name: 'Documentary', words: ['documentary', 'documentaries', 'דוקו'] },
-  { name: 'Drama', words: ['drama', 'דרמה'] },
-  { name: 'Family', words: ['family', 'משפחה'] },
-  { name: 'Kids', words: ['kids', "children's", 'children', 'ילדים'] },
-  { name: 'Mystery', words: ['mystery', 'מסתורין'] },
-  { name: 'News', words: ['news', 'חדשות'] },
-  { name: 'Reality', words: ['reality', 'ריאליטי', 'ריאלטי'] },
-  { name: 'Sci-Fi & Fantasy', words: ['sci-fi', 'science fiction', 'fantasy', 'מדע בדיוני', 'פנטזיה'] },
-  { name: 'Soap', words: ['soap', 'טלנובלה', 'סבון'] },
-  { name: 'Talk', words: ['talk show', 'talkshow', 'אירוח'] },
-  { name: 'War & Politics', words: ['war shows', 'politics', 'מלחמה', 'פוליטיקה'] },
-  { name: 'Western', words: ['western', 'מערבון'] },
-];
+// Genre/country cue words live in util.ts (GENRE_GROUNDING_CUES /
+// COUNTRY_GROUNDING_CUES) — the same vocabulary the grounding
+// backstop uses, so mock extraction and grounding can never drift
+// apart. EXCLUSION_MARKERS stays local: it deliberately excludes
+// the quantity words ('nothing', 'none', ...) that the grounding
+// markers include, because "nothing but comedies" is an inclusion
+// and the year regexes below handle those phrasings directly.
 
 /** Extract preference rules from note statements. Exported for selftest. */
 export function extractMockRules(notes: string[]): PreferenceRule[] {
@@ -214,7 +197,7 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
         : null;
     if (genreMode || lower.includes('only') || lower.includes('רק') || lower.includes('must') || lower.includes('חייב')) {
       const operator = categorical || negatedPrefer ? 'isNot' : 'is';
-      for (const cue of GENRE_CUE_WORDS) {
+      for (const cue of GENRE_GROUNDING_CUES) {
         const id = genreIdByName.get(cue.name);
         if (id === undefined) continue;
         for (const w of cue.words) {
@@ -225,7 +208,7 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
           break;
         }
       }
-      for (const cue of COUNTRY_CUE_WORDS) {
+      for (const cue of COUNTRY_GROUNDING_CUES) {
         for (const w of cue.words) {
           const idx = lower.indexOf(w.toLowerCase());
           if (idx === -1) continue;

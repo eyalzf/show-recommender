@@ -996,6 +996,168 @@ export function softRuleScore(facts: ShowFacts, rules: PreferenceRule[]): number
   return count === 0 ? 0 : total / count;
 }
 
+// ---------------------------------------------------------------- rule grounding
+//
+// The model extracts rules by meaning, and meaning is not a
+// guarantee: on 2026-11-17 the 70B model twice emitted a HARD genre
+// rule for a category no note names (Talk, then Kids on the next
+// run) and marked a "prefers not" rejection hard. The prompt's
+// when-in-doubt-omit instruction did not prevent it. So every
+// extracted rule passes this deterministic backstop before it is
+// stored: the rule's category/value must be NAMED in the raw notes
+// (cue-word match, both languages), and a hard rule must be backed
+// by a statement with categorical wording — otherwise the rule is
+// dropped, or demoted to soft. Grounding is deliberately lenient
+// (substring/stem cues): it exists to catch inventions, not to
+// second-guess legitimate mappings, and a dropped rule's preference
+// still lives in the prose summary. Rating lines never ground a
+// rule — per-show feedback is not a category statement, so the
+// caller passes NOTE texts only.
+
+/** Cue words per genre (canonical name -> EN + HE stems). Shared with the mock extractor. */
+export const GENRE_GROUNDING_CUES: ReadonlyArray<{ name: string; words: string[] }> = [
+  { name: 'Action & Adventure', words: ['action', 'adventure', 'אקשן', 'הרפתקאות'] },
+  { name: 'Animation', words: ['animation', 'animated', 'אנימציה', 'מצויר'] },
+  { name: 'Comedy', words: ['comedy', 'comedies', 'sitcom', 'קומדיה', 'קומי', 'סיטקום'] },
+  { name: 'Crime', words: ['crime', 'פשע'] },
+  { name: 'Documentary', words: ['documentary', 'documentaries', 'דוקו'] },
+  { name: 'Drama', words: ['drama', 'דרמה'] },
+  { name: 'Family', words: ['family', 'משפחה'] },
+  { name: 'Kids', words: ['kids', "children's", 'children', 'ילדים'] },
+  { name: 'Mystery', words: ['mystery', 'מסתורין'] },
+  { name: 'News', words: ['news', 'current affairs', 'current-affairs', 'חדשות', 'אקטואליה'] },
+  { name: 'Reality', words: ['reality', 'ריאליטי', 'ריאלטי'] },
+  { name: 'Sci-Fi & Fantasy', words: ['sci-fi', 'science fiction', 'fantasy', 'מדע בדיוני', 'פנטזיה'] },
+  { name: 'Soap', words: ['soap', 'טלנובלה', 'סבון'] },
+  { name: 'Talk', words: ['talk show', 'talkshow', 'אירוח'] },
+  { name: 'War & Politics', words: ['war shows', 'politics', 'מלחמה', 'פוליטיקה'] },
+  { name: 'Western', words: ['western', 'מערבון'] },
+];
+
+/** Cue words per origin country (ISO code -> EN + HE adjectives). Shared with the mock extractor. */
+export const COUNTRY_GROUNDING_CUES: ReadonlyArray<{ code: string; words: string[] }> = [
+  { code: 'US', words: ['american', 'אמריקאי', 'אמריקאית'] },
+  { code: 'GB', words: ['british', 'uk ', 'בריטי'] },
+  { code: 'KR', words: ['korean', 'קוריאני'] },
+  { code: 'IL', words: ['israeli', 'ישראלי'] },
+  { code: 'ES', words: ['spanish', 'ספרדי'] },
+  { code: 'FR', words: ['french', 'צרפתי'] },
+  { code: 'DE', words: ['german', 'גרמני'] },
+  { code: 'JP', words: ['japanese', 'יפני'] },
+  { code: 'TR', words: ['turkish', 'טורקי'] },
+];
+
+/** Cue words per TMDB status value. */
+export const STATUS_GROUNDING_CUES: Record<string, string[]> = {
+  'Returning Series': ['returning', 'ongoing', 'still running', 'ממשיכ', 'עדיין רצ'],
+  Planned: ['planned', 'מתוכננ'],
+  'In Production': ['in production', 'being made', 'בהפקה'],
+  Ended: ['ended', 'finished', 'completed', 'הסתיימ', 'גמור', 'סיימ'],
+  Canceled: ['canceled', 'cancelled', 'בוטל'],
+  Pilot: ['pilot', 'פיילוט'],
+};
+
+/**
+ * Categorical wording markers for the hard-mode check. A superset
+ * of the mock extractor's markers (which deliberately excludes the
+ * quantity words 'nothing'/'none' — "nothing but comedies" is an
+ * inclusion, and the mock's year regexes handle those phrasings
+ * directly). Grounding has no such trap: it only asks whether a
+ * grounding statement rejects categorically.
+ */
+export const CATEGORICAL_MARKERS: ReadonlyArray<string> = [
+  'never', "don't like", 'dont like', 'hate', "can't stand", 'cant stand',
+  'avoid', 'no ', 'not a fan', 'dislike', 'must', 'only',
+  'nothing', 'none',
+  'לעולם לא', 'לא אוהב', 'לא אוהבת', 'שונא', 'שונאת', 'לא סובל', 'לא סובלת', 'לא רוצה', 'חייב', 'רק',
+  'שום דבר', 'כלום',
+];
+
+function groundsRule(loweredText: string, rule: PreferenceRule): boolean {
+  switch (rule.dimension) {
+    case 'genre': {
+      const name = TMDB_TV_GENRES.find((g) => g.id === rule.value)?.name;
+      const cue = GENRE_GROUNDING_CUES.find((c) => c.name === name);
+      const words = [...(cue?.words ?? []), (name ?? '').toLowerCase()].filter(Boolean);
+      return words.some((w) => loweredText.includes(w));
+    }
+    case 'year': {
+      // A year rule is grounded when the notes name a year within 1
+      // of the threshold (the standard boundary derivations — "after
+      // 2010" -> >= 2011, "only before 2000" -> <= 1999 — shift by
+      // one) or a decade containing it ("the 90s", "שנות ה-90").
+      // The model owns the threshold arithmetic; grounding only
+      // requires that some era language consistent with the rule
+      // exists, so an invented year still drops.
+      const v = rule.value as number;
+      const years = [...loweredText.matchAll(/\b(?:19|20)\d{2}\b/g)].map((m) => Number(m[0]));
+      if (years.some((y) => Math.abs(y - v) <= 1)) return true;
+      const decades: Array<[number, number]> = [];
+      for (const m of loweredText.matchAll(/\b(\d{2})'?s\b/g)) {
+        const s = 1900 + Number(m[1]);
+        decades.push([s, s + 9]);
+      }
+      for (const m of loweredText.matchAll(/\b(?:19|20)\d{2}s\b/g)) {
+        const s = Number(m[0].slice(0, 4));
+        decades.push([s, s + 9]);
+      }
+      for (const m of loweredText.matchAll(/שנות ה-(\d{2,4})/g)) {
+        const n = Number(m[1]);
+        const s = n < 100 ? 1900 + n : n;
+        decades.push([s, s + 9]);
+      }
+      return decades.some(([s, e]) => v >= s - 1 && v <= e + 1);
+    }
+    case 'country': {
+      const cue = COUNTRY_GROUNDING_CUES.find((c) => c.code === rule.value);
+      if (cue && cue.words.some((w) => loweredText.includes(w.toLowerCase()))) return true;
+      // The bare code only counts as a whole word ('US' in 'because' is not a country).
+      return new RegExp(`\\b${String(rule.value).toLowerCase()}\\b`).test(loweredText);
+    }
+    case 'status': {
+      const words = STATUS_GROUNDING_CUES[rule.value as string] ?? [];
+      return words.some((w) => loweredText.includes(w));
+    }
+    case 'seasons':
+      return (
+        new RegExp(`\\b${rule.value}\\b`).test(loweredText) &&
+        (loweredText.includes('season') || loweredText.includes('עונ'))
+      );
+    case 'episodeMinutes':
+      return (
+        new RegExp(`\\b${rule.value}\\b`).test(loweredText) &&
+        (loweredText.includes('minute') || loweredText.includes('דק'))
+      );
+  }
+}
+
+/**
+ * Ground extracted rules against the raw NOTE texts (never rating
+ * lines): drop rules no note names, and demote hard rules whose
+ * grounding statements carry no categorical wording to soft. The
+ * input must already be validated (validateRules); the output
+ * preserves order. Never throws.
+ */
+export function groundRules(rules: PreferenceRule[], noteTexts: string[]): PreferenceRule[] {
+  const lowered = noteTexts.map((t) => t.toLowerCase());
+  const out: PreferenceRule[] = [];
+  for (const rule of rules) {
+    const grounding = lowered.filter((text) => groundsRule(text, rule));
+    if (grounding.length === 0) continue;
+    if (
+      rule.mode === 'hard' &&
+      !grounding.some((text) =>
+        CATEGORICAL_MARKERS.some((m) => text.includes(m.toLowerCase())),
+      )
+    ) {
+      out.push({ ...rule, mode: 'soft' });
+    } else {
+      out.push(rule);
+    }
+  }
+  return out;
+}
+
 /** Taste text for one list kind: Shared + that kind's section. */
 export function tasteTextForKind(sections: TasteSections, kind: 'casual' | 'deep'): string {
   return [sections.shared.trim(), sections[kind].trim()].filter(Boolean).join('\n');
