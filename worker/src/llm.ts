@@ -205,23 +205,27 @@ export interface ConsolidationNote {
  * fingerprint below always describes exactly what the prompt would
  * receive.
  *
- * Every rating feeds consolidation — a rating carries its show title
- * even without a reason ("Liked: Fauda" is a taste statement); only
- * text-less notes are meaningless and skipped. Titles in prompts are
- * inside the terms guardrail (titles/IDs + factual labels only). A
- * rating's free-text reason is glued to its show title
- * ("Title: reason") and keeps its [rating:*] label; a standalone
- * note renders label-less with sentiment inferred from wording.
+ * TEXT ONLY: a rating feeds consolidation only when it carries a
+ * free-text reason. A bare rating is not consolidation input at all
+ * — its ranking effect lives in the embedding/deterministic paths,
+ * which read the raw log directly — so rating a show never dirties
+ * the fingerprint and never triggers a consolidation. The
+ * fingerprint over this array IS the consolidation-required flag:
+ * it changes only when new free text arrives. A rating's reason is
+ * glued to its show title ("Title: reason") as context and keeps its
+ * [rating:*] label (the label carries the reason's sentiment); a
+ * standalone note renders label-less with sentiment inferred from
+ * wording. Titles in prompts are inside the terms guardrail
+ * (titles/IDs + factual labels only) — and the prompt bans titles
+ * from the OUTPUT (see buildConsolidationPrompt).
  */
 export function buildConsolidationNotes(feedback: FeedbackRow[]): ConsolidationNote[] {
   return feedback
-    .filter((f) =>
-      f.kind === 'show' ? Boolean(f.showTitle || f.text.trim()) : f.text.trim().length > 0,
-    )
+    .filter((f) => f.text.trim().length > 0)
     .map((f) => ({
       kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
       source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
-      text: f.showTitle ? (f.text.trim() ? `${f.showTitle}: ${f.text}` : f.showTitle) : f.text,
+      text: f.showTitle ? `${f.showTitle}: ${f.text}` : f.text,
       createdAt: f.createdAt,
     }));
 }
@@ -232,8 +236,10 @@ export function buildConsolidationNotes(feedback: FeedbackRow[]): ConsolidationN
  * changes meaningfully — stored fingerprints from older versions
  * then differ, so every profile re-consolidates once at its next
  * refresh instead of serving a record derived under old semantics.
+ * v2 (2026-11-17): text-only input — bare ratings no longer feed
+ * consolidation — plus the show-name output ban.
  */
-export const CONSOLIDATION_INPUT_VERSION = 1;
+export const CONSOLIDATION_INPUT_VERSION = 2;
 
 /**
  * Fingerprint of exactly what a consolidation call would consume:
@@ -307,7 +313,9 @@ function rulesSpecFragment(): string {
 }
 
 /**
- * Build the taste-consolidation prompt from the RAW feedback log only.
+ * Build the taste-consolidation prompt from the profile's FREE-TEXT
+ * feedback only (notes + rating reasons — bare ratings never reach
+ * this prompt; they affect ranking through embeddings only).
  * Input is user-authored text; no TMDB content ever enters this prompt.
  *
  * The model returns a JSON object: the consolidated summary in THREE
@@ -350,8 +358,9 @@ export function buildConsolidationPrompt(
       'Write ONLY in ' +
       (uiLang === 'he' ? 'Hebrew' : 'English') +
       '. Keep nuance (e.g. per-language likes/dislikes). Do not invent shows or preferences not in the notes. ' +
+      'Never name a specific show in the summary: generalize any show mention (including ones already in the current summary) into the underlying preference, or drop it if it carries none. ' +
       'ROUTING RULES — every statement goes to exactly one section: ' +
-      '1) Entries marked [rating:*] come from show ratings (liked/disliked/dropped). Their statements ALWAYS go to Shared, never to Casual or Deep focus. ' +
+      '1) Entries marked [rating:*] come from free-text reasons attached to show ratings (liked/disliked/dropped). Their statements ALWAYS go to Shared, never to Casual or Deep focus. ' +
       '2) Free-text notes ([note]) are routed by meaning. Explicit mode wording routes directly: "for casual", "light evenings", "when tired", "background watching" go to Casual; "for deep focus", "when I can concentrate", "immersive", "full attention" go to Deep focus — Hebrew equivalents too: "קליל", "ערב קליל", "כשעייפים", "ברקע" go to Casual; "מעמיק", "מיקוד עמוק", "כשאפשר להתרכז", "דורש ריכוז", "סוחף" go to Deep focus. ' +
       '3) Implicit cues: lightness, ease, background-friendliness, short-and-simple, easy to dip into go to Casual; depth, complexity, serialization, demands attention, slow burn go to Deep focus. ' +
       '4) Genre, topic, language, and content likes/dislikes ("love Israeli drama", "no horror") go to Shared. ' +

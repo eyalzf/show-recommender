@@ -962,8 +962,9 @@ const consolOut1 = await mockProvider.generate(consolReq);
 const consolOut2 = await mockProvider.generate(consolReq);
 assert.equal(consolOut1, consolOut2); // deterministic
 const consolParsed = util.parseConsolidationResponse(consolOut1);
-assert.ok(consolParsed.sections.shared.includes('Fauda')); // ratings -> Shared
-assert.ok(consolParsed.sections.shared.includes('The Office'));
+assert.ok(consolParsed.sections.shared.includes('too cringe')); // rating reason -> Shared, title stripped
+assert.ok(!consolParsed.sections.shared.includes('Fauda')); // bare title: no free text, dropped
+assert.ok(!consolParsed.sections.shared.includes('The Office')); // show names never surface in the summary
 assert.ok(consolParsed.sections.shared.includes('No horror')); // ambiguous -> Shared
 assert.ok(consolParsed.sections.casual.includes('light')); // casual cue routes
 assert.ok(consolParsed.sections.deep.includes('immersive')); // deep cue routes
@@ -982,10 +983,9 @@ const fbRows = [
   { id: '5', kind: 'show', tmdbId: 3, showTitle: null, rating: 'liked', text: '', originalLanguage: null, createdAt: 5 },
 ];
 assert.deepEqual(llm.buildConsolidationNotes(fbRows), [
-  { kind: 'liked', source: 'rating', text: 'Fauda', createdAt: 1 },
   { kind: 'disliked', source: 'rating', text: 'The Office: too cringe', createdAt: 2 },
   { kind: 'note', source: 'note', text: 'Something light', createdAt: 3 },
-]); // text-less note + title-less/text-less rating skipped; reason glued to title
+]); // TEXT ONLY: bare rating (Fauda) excluded — ratings feed embeddings, not consolidation; text-less note + title-less/text-less rating skipped; reason glued to title
 
 const fpNotes = llm.buildConsolidationNotes(fbRows);
 const fp1 = llm.consolidationInputFingerprint(fpNotes, 'workers-ai:llama-3.3-70b');
@@ -999,7 +999,7 @@ assert.equal(
   llm.consolidationInputFingerprint(fpNotes.map((n) => ({ ...n, createdAt: n.createdAt + 1000 })), 'workers-ai:llama-3.3-70b'),
   fp1,
 ); // timestamps are not input
-assert.equal(llm.CONSOLIDATION_INPUT_VERSION, 1);
+assert.equal(llm.CONSOLIDATION_INPUT_VERSION, 2); // v2: text-only input + show-name output ban
 
 // --- mock Hebrew cue routing (dev-only simulation fidelity) ---
 // Eyal's exact dev-profile sentences route to the right sections when

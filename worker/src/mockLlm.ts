@@ -290,9 +290,13 @@ export function extractMockRules(notes: string[]): PreferenceRule[] {
  * Mock consolidation: echo the prompt's raw-note lines into the three
  * sections deterministically. Rating lines always land in Shared (the
  * production routing rule); free-text notes route on the same cue
- * words the real prompt lists, defaulting to Shared. No statements are
- * invented, dropped, or reworded — the output is a pure function of
- * the input lines, so a mock consolidation is trivially auditable.
+ * words the real prompt lists, defaulting to Shared. The show-name
+ * output ban is mirrored: a rating line's "Title: " prefix is
+ * stripped (first ': ' split — the title is prompt context only),
+ * and a bare-title rating line (no reason) is dropped entirely, as
+ * the real model generalizes-or-drops it. No statements are
+ * invented or reworded — the output is a pure function of the input
+ * lines, so a mock consolidation is trivially auditable.
  */
 function mockConsolidation(userText: string): string {
   const rawMarker = userText.indexOf('Raw notes');
@@ -310,7 +314,11 @@ function mockConsolidation(userText: string): string {
     const statement = match[2].trim();
     if (!statement) continue;
     if (label.startsWith('rating:')) {
-      sections.shared.push(statement);
+      // Title is context only: keep the reason, drop the title; a
+      // bare title carries no free text and is dropped outright.
+      const sep = statement.indexOf(': ');
+      if (sep < 0) continue;
+      sections.shared.push(statement.slice(sep + 2).trim());
     } else {
       sections[routeNote(statement)].push(statement);
       noteStatements.push(statement);
