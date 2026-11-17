@@ -261,7 +261,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
         {lang === 'he' ? <div className="section-sub">{subEn}</div> : null}
         <div className="hairline" aria-hidden="true" />
       </div>
-      {generating && items.length === 0 ? (
+      {generating ? (
         renderBuilding()
       ) : items.length === 0 ? (
         // On a failed load the error toast + retry action explains the
@@ -271,12 +271,6 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
         )
       ) : (
         <>
-          {generating ? (
-            <p className="building-line" role="status">
-              <span className="spinner" aria-hidden="true" />
-              {t(lang, 'buildingList')}
-            </p>
-          ) : null}
           <Rail label={title}>
             {items.map((item) => (
               <RailCard
@@ -289,7 +283,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
               />
             ))}
           </Rail>
-          {reason && items.length < 10 && !generating ? (
+          {reason && items.length < 10 ? (
             <p className="short-reason">{reason}</p>
           ) : null}
         </>
@@ -322,42 +316,47 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
       <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
 
-      <div className="mood-row-head">
-        <span className="mood-label">{t(lang, 'moodLabel')}</span>
-        <button type="button" className="btn btn-ghost" onClick={() => setSheetOpen(true)}>
-          {t(lang, 'moodManage')}
-        </button>
-      </div>
-      <div className="mood-chips" role="group" aria-label={t(lang, 'moodLabel')}>
-        <button
-          type="button"
-          className={activeMoodId === null ? 'mood-chip active' : 'mood-chip'}
-          aria-pressed={activeMoodId === null}
-          onClick={() => void switchMood(null)}
-        >
-          {t(lang, 'moodMain')}
-        </button>
-        {moods.map((mood) => (
+      <div className="mood-card">
+        <div className="mood-row-head">
+          <span className="mood-label">
+            <span aria-hidden="true">🎭 </span>
+            {t(lang, 'moodLabel')}
+          </span>
+          <button type="button" className="btn btn-ghost" onClick={() => setSheetOpen(true)}>
+            {t(lang, 'moodManage')}
+          </button>
+        </div>
+        <div className="mood-chips" role="group" aria-label={t(lang, 'moodLabel')}>
           <button
             type="button"
-            key={mood.id}
-            className={mood.id === activeMoodId ? 'mood-chip active' : 'mood-chip'}
-            aria-pressed={mood.id === activeMoodId}
-            onClick={() => void switchMood(mood.id)}
+            className={activeMoodId === null ? 'mood-chip active' : 'mood-chip'}
+            aria-pressed={activeMoodId === null}
+            onClick={() => void switchMood(null)}
           >
-            {mood.text}
+            {t(lang, 'moodMain')}
           </button>
-        ))}
-        <button
-          type="button"
-          className="mood-chip mood-chip-add"
-          onClick={() => setAddOpen((v) => !v)}
-          aria-expanded={addOpen}
-        >
-          {t(lang, 'moodNew')}
-        </button>
+          {moods.map((mood) => (
+            <button
+              type="button"
+              key={mood.id}
+              className={mood.id === activeMoodId ? 'mood-chip active' : 'mood-chip'}
+              aria-pressed={mood.id === activeMoodId}
+              onClick={() => void switchMood(mood.id)}
+            >
+              {mood.text}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="mood-chip mood-chip-add"
+            onClick={() => setAddOpen((v) => !v)}
+            aria-expanded={addOpen}
+          >
+            {t(lang, 'moodNew')}
+          </button>
+        </div>
+        {addOpen ? renderAddRow() : null}
       </div>
-      {addOpen ? renderAddRow() : null}
 
       {activeMood ? (
         <div className="mood-banner">
