@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import type { FeedbackRow } from './db';
 import { MockLlmProvider } from './mockLlm';
 import { CATEGORICAL_MARKERS_EN, CATEGORICAL_MARKERS_HE, formatSectionsForPrompt, LIKING_MARKERS_EN, LIKING_MARKERS_HE, MILD_MARKERS_EN, MILD_MARKERS_HE, TMDB_TV_GENRES, type PreferenceRule, type TasteSections } from './util';
 
@@ -49,12 +50,14 @@ export interface LlmRequest {
   /** Cap on generated tokens; provider default when omitted. */
   maxTokens?: number;
   /**
-   * Sampling temperature; provider default when omitted. Ranking and
-   * removal-check prompts set 0 (greedy decoding) so re-ranking the
-   * same candidates with the same taste yields the same order —
-   * list stability depends on it. Consolidation leaves it unset
-   * (wording quality benefits from sampling; the no-op guard absorbs
-   * the variance by skipping unchanged saves).
+   * Sampling temperature; provider default when omitted. Ranking,
+   * removal-check, and consolidation prompts set 0 (greedy decoding)
+   * so re-running the same input yields the same output — list
+   * stability depends on it for ranking, and consolidation's
+   * skip-when-unchanged guards depend on it: at sampling
+   * temperatures a re-run rewords the summary, defeats the no-op
+   * guard, and cascades into a regeneration. Mood extraction keeps
+   * the provider default (it runs once per mood creation).
    */
   temperature?: number;
 }
@@ -114,9 +117,9 @@ export class WorkersAiLlamaProvider implements LlmProvider {
         { role: 'user', content: req.user },
       ],
       max_tokens: req.maxTokens ?? 512,
-      // Sent only when the prompt sets it: ranking/removal prompts
-      // pin temperature 0 (greedy); everything else keeps the
-      // provider default.
+      // Sent only when the prompt sets it: ranking, removal-check,
+      // and consolidation prompts pin temperature 0 (greedy);
+      // everything else keeps the provider default.
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     })) as unknown;
     // Shape 1 (observed 2026-11-15): OpenAI-style chat completion.
@@ -193,6 +196,72 @@ export interface ConsolidationNote {
   source: 'rating' | 'note';
   text: string;
   createdAt: number;
+}
+
+/**
+ * Build the consolidation input from the raw feedback log. THE single
+ * construction — consolidateFromLog, the taste self-heal, and the
+ * lazy pre-generation check all derive the same notes array, so the
+ * fingerprint below always describes exactly what the prompt would
+ * receive.
+ *
+ * Every rating feeds consolidation — a rating carries its show title
+ * even without a reason ("Liked: Fauda" is a taste statement); only
+ * text-less notes are meaningless and skipped. Titles in prompts are
+ * inside the terms guardrail (titles/IDs + factual labels only). A
+ * rating's free-text reason is glued to its show title
+ * ("Title: reason") and keeps its [rating:*] label; a standalone
+ * note renders label-less with sentiment inferred from wording.
+ */
+export function buildConsolidationNotes(feedback: FeedbackRow[]): ConsolidationNote[] {
+  return feedback
+    .filter((f) =>
+      f.kind === 'show' ? Boolean(f.showTitle || f.text.trim()) : f.text.trim().length > 0,
+    )
+    .map((f) => ({
+      kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
+      source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
+      text: f.showTitle ? (f.text.trim() ? `${f.showTitle}: ${f.text}` : f.showTitle) : f.text,
+      createdAt: f.createdAt,
+    }));
+}
+
+/**
+ * Version of the consolidation input semantics. Bump when the
+ * consolidation prompt, the grounding, or the rule vocabulary
+ * changes meaningfully — stored fingerprints from older versions
+ * then differ, so every profile re-consolidates once at its next
+ * refresh instead of serving a record derived under old semantics.
+ */
+export const CONSOLIDATION_INPUT_VERSION = 1;
+
+/**
+ * Fingerprint of exactly what a consolidation call would consume:
+ * the notes array (kind + source + text, in log order) and the
+ * provider/model name. Deliberately EXCLUDES createdAt (a re-stated
+ * identical input is the same input), the stored sections (a manual
+ * section edit must not force a re-consolidation of an unchanged
+ * log — the edit is preserved until new log input arrives), and the
+ * language filter (conflict display is computed live on read).
+ *
+ * FNV-1a 32-bit: change detection only, not security. Pure and
+ * deterministic — unit-tested in scripts/selftest.mjs.
+ */
+export function consolidationInputFingerprint(
+  notes: ConsolidationNote[],
+  providerName: string,
+): string {
+  const canonical = JSON.stringify({
+    v: CONSOLIDATION_INPUT_VERSION,
+    provider: providerName,
+    notes: notes.map((n) => [n.kind, n.source, n.text]),
+  });
+  let h = 0x811c9dc5;
+  for (let i = 0; i < canonical.length; i++) {
+    h ^= canonical.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
 }
 
 function quoteMarkers(markers: ReadonlyArray<string>): string {
@@ -316,6 +385,10 @@ export function buildConsolidationPrompt(
       (existingText ? `Current summary:\n${existingText}\n\n` : 'No current summary.\n\n') +
       `Raw notes (user-authored, newest last):\n${notes}\n\nWrite the updated consolidated taste description as the JSON object.`,
     maxTokens: 1200,
+    // Greedy: a re-run over an unchanged log must reproduce the
+    // stored record, so the fingerprint/no-op guards can skip it
+    // instead of rewording it into a regeneration cascade.
+    temperature: 0,
   };
 }
 

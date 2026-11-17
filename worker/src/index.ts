@@ -19,7 +19,9 @@ import {
   type TmdbSearchResult,
 } from './tmdb';
 import {
+  buildConsolidationNotes,
   buildConsolidationPrompt,
+  consolidationInputFingerprint,
   getLlmProvider,
   getRankLlmProvider,
   isDevWorker,
@@ -51,6 +53,7 @@ import {
   seedPresetMoods,
   setActiveMood,
   updateProfile,
+  updateTasteInputHash,
   type BootstrapStatus,
   type MoodRow,
 } from './db';
@@ -550,7 +553,7 @@ async function listsResponse(
     }
     return storedResponse(casual, deep, false, casualReason, deepReason);
   }
-  const ctx = await loadProfileContext(db, profileId, uiLang);
+  let ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) {
     return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
   }
@@ -570,6 +573,29 @@ async function listsResponse(
       casualShortReason: null,
       deepShortReason: null,
     };
+  }
+  // Lazy consolidation: ratings/notes no longer consolidate eagerly,
+  // so the taste record catches up HERE — right before the refresh
+  // that will use it — when the log changed since it was derived.
+  // Generation then ranks with fresh prose/rules, and plain reads
+  // (fast path above) cost no model call. Best-effort: a failed
+  // consolidation must never fail the refresh — generation proceeds
+  // with the stored record and the next refresh retries. A
+  // consolidation that changes the record invalidates all moods'
+  // snapshots (as the old eager trigger did); this regeneration
+  // saves fresh snapshots for the requested mood right after.
+  const genNotes = buildConsolidationNotes(ctx.feedback);
+  if (
+    genNotes.length > 0 &&
+    consolidationInputFingerprint(genNotes, getLlmProvider(c.env).name) !== ctx.tasteInputHash
+  ) {
+    try {
+      await consolidateFromLog(c.env, db, profileId, uiLang);
+      const fresh = await loadProfileContext(db, profileId, uiLang);
+      if (fresh) ctx = fresh;
+    } catch (err) {
+      console.error('lazy pre-generation consolidation failed', err);
+    }
   }
   // Regenerate WITH the stored reservoirs (empty on first build, or
   // after a legacy pool row): prune + re-rank instead of rebuild.
@@ -812,6 +838,13 @@ app.post('/api/feedback', async (c: Ctx) => {
     );
   }
   await requireProfileAccess(c, profileId);
+  // Deferred consolidation: a rating's ranking effect is immediate
+  // without it (surgical prune + the embedding/deterministic paths
+  // read the raw log directly), so the prose summary consolidates
+  // only when the bootstrap completes — or lazily at the next
+  // refresh / Preferences read. Capture the bootstrap state BEFORE
+  // the insert to catch the exact completing write.
+  const bootstrapBefore = await loadBootstrapStatus(c.env.DB!, profileId);
   await insertFeedback(
     c.env.DB!,
     profileId,
@@ -828,10 +861,15 @@ app.post('/api/feedback', async (c: Ctx) => {
   } catch (err) {
     console.error('people-score recompute failed', err);
   }
-  // Event-driven consolidation: the living summary follows new feedback
-  // (background via waitUntil — the write itself stays fast).
-  const profile = await loadProfile(c.env.DB!, profileId);
-  if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
+  // The bootstrap-completing write consolidates in the background
+  // (via waitUntil — the write itself stays fast), so the first
+  // list generation already has a fresh summary. Later ratings
+  // consolidate lazily at refresh time instead.
+  const bootstrapAfter = await loadBootstrapStatus(c.env.DB!, profileId);
+  if (!bootstrapBefore.complete && bootstrapAfter.complete) {
+    const profile = await loadProfile(c.env.DB!, profileId);
+    if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
+  }
   return c.json({ ok: true });
 });
 
@@ -867,13 +905,20 @@ app.post('/api/notes', async (c: Ctx) => {
     );
   }
   await requireProfileAccess(c, profileId);
+  // Deferred consolidation (see /api/feedback): capture the
+  // bootstrap state BEFORE the insert to catch the completing write.
+  const bootstrapBefore = await loadBootstrapStatus(c.env.DB!, profileId);
   await insertNote(c.env.DB!, profileId, noteKind as 'like' | 'dislike' | 'note', String(text).trim());
-  // No list action here: the background consolidation invalidates
-  // (snapshots cleared, reservoirs kept) only when it actually
-  // changes the taste record — a note that changes nothing costs no
-  // regeneration.
-  const profile = await loadProfile(c.env.DB!, profileId);
-  if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
+  // No list action and no immediate consolidation here: the next
+  // refresh consolidates first when the log changed, and the
+  // consolidation invalidates (snapshots cleared, reservoirs kept)
+  // only when it actually changes the taste record — a note that
+  // changes nothing costs no regeneration.
+  const bootstrapAfter = await loadBootstrapStatus(c.env.DB!, profileId);
+  if (!bootstrapBefore.complete && bootstrapAfter.complete) {
+    const profile = await loadProfile(c.env.DB!, profileId);
+    if (profile) scheduleConsolidation(c, profileId, profile.uiLanguage);
+  }
   return c.json({ ok: true });
 });
 
@@ -914,22 +959,26 @@ async function consolidateFromLog(
   const ctx = await loadProfileContext(db, profileId, uiLang);
   if (!ctx) return 'not_found';
   const provider = getLlmProvider(env);
-  // Every rating feeds consolidation — a rating carries its show title
-  // even without a reason ("Liked: Fauda" is a taste statement); only
-  // text-less notes are meaningless and skipped. Titles in prompts are
-  // inside the terms guardrail (titles/IDs + factual labels only).
-  const notes: ConsolidationNote[] = ctx.feedback
-    .filter((f) =>
-      f.kind === 'show' ? Boolean(f.showTitle || f.text.trim()) : f.text.trim().length > 0,
-    )
-    .map((f) => ({
-      kind: String(f.rating ?? (f.kind === 'show' ? 'show' : 'note')),
-      source: f.kind === 'show' ? ('rating' as const) : ('note' as const),
-      text: f.showTitle ? (f.text.trim() ? `${f.showTitle}: ${f.text}` : f.showTitle) : f.text,
-      createdAt: f.createdAt,
-    }));
+  const notes = buildConsolidationNotes(ctx.feedback);
   if (notes.length === 0) {
     // Nothing to consolidate from — no LLM call, nothing saved.
+    return {
+      summary: '',
+      sections: { ...ctx.tasteSections },
+      contradictions: [],
+      languageConflict: null,
+      rules: ctx.rules,
+      provider: provider.name,
+    };
+  }
+  // Skip-when-unchanged: the stored record already derives from
+  // exactly this input (same notes, same model, same input
+  // version) — no model call, nothing saved. Temperature 0 makes
+  // re-runs reproducible, so a skip is behavior-identical to a call.
+  // A stored record must exist: a NULL/absent fingerprint (never
+  // consolidated, or a pre-migration row) always differs.
+  const fingerprint = consolidationInputFingerprint(notes, provider.name);
+  if (ctx.tasteSummary != null && fingerprint === ctx.tasteInputHash) {
     return {
       summary: '',
       sections: { ...ctx.tasteSections },
@@ -987,6 +1036,13 @@ async function consolidateFromLog(
         await saveTasteRecord(db, profileId, uiLang, next);
         await invalidateLists(db, profileId);
       }
+      // The input was consumed — stamp its fingerprint even on the
+      // no-op path, so the next trigger skips the call instead of
+      // re-running it. Inside the staleness guard: a stale run must
+      // not stamp a fingerprint for input it never saw. Stamped
+      // AFTER the save so a first consolidation stamps a row that
+      // exists.
+      await updateTasteInputHash(db, profileId, uiLang, fingerprint);
     }
   }
   return {
@@ -1000,13 +1056,16 @@ async function consolidateFromLog(
 }
 
 /**
- * Event-driven consolidation (settled refresh model): after feedback or
- * a note lands, re-consolidate in the background via waitUntil, so the
- * write stays fast and the living summary never goes stale. Best
- * effort — a failed consolidation must never fail the write, and the
- * next write (or the GET /api/taste self-heal) retries it. Rapid
- * successive writes may race; every run derives from the full raw log,
- * so results converge, and the next trigger heals any stale winner.
+ * Background consolidation (deferred refresh model): runs on the
+ * bootstrap-completing write and from the GET /api/taste self-heal
+ * when the log changed. Post-bootstrap ratings/notes do NOT
+ * schedule it — the taste record catches up lazily at the next
+ * refresh instead (see listsResponse). Best effort — a failed
+ * consolidation must never fail the write, and the next trigger
+ * (or the lazy pre-generation check) retries it. Rapid successive
+ * writes may race; every run derives from the full raw log, and
+ * temperature 0 makes same-input runs identical, so results
+ * converge.
  */
 function scheduleConsolidation(c: Ctx, profileId: string, uiLang: string): void {
   if (!hasDb(c)) return;
@@ -1035,10 +1094,16 @@ app.get('/api/taste', async (c: Ctx) => {
   if (!ctx) {
     return c.json({ error: 'not_found', message: 'Profile not found.' }, 404);
   }
-  // Self-heal: a profile with feedback but no stored summary yet (e.g.
-  // consolidation never ran, or it ran before this trigger existed)
-  // consolidates in the background; the next read shows the sections.
-  if (ctx.tasteSummary == null && ctx.feedback.length > 0) {
+  // Self-heal, fingerprint-gated: when the raw log changed since
+  // the stored record was derived (or no record exists yet — a NULL
+  // fingerprint always differs), consolidate in the background; the
+  // next read shows the sections. An unchanged log schedules
+  // nothing, so Preferences reads cost no model call.
+  const tasteNotes = buildConsolidationNotes(ctx.feedback);
+  if (
+    tasteNotes.length > 0 &&
+    consolidationInputFingerprint(tasteNotes, getLlmProvider(c.env).name) !== ctx.tasteInputHash
+  ) {
     scheduleConsolidation(c, profileId, lang);
   }
   const allTexts = [
@@ -1144,9 +1209,11 @@ app.put('/api/taste', async (c: Ctx) => {
 
 // Consolidate raw notes into the living summary via the LLM layer.
 // The prompt contains ONLY user-authored text (see llm.ts terms guardrail).
-// The same consolidation also runs event-driven in the background after
-// feedback/note writes (scheduleConsolidation above); this route is the
-// manual re-run.
+// The same consolidation also runs lazily before list regenerations
+// and in the background on bootstrap completion / Preferences reads
+// (scheduleConsolidation above); this route is the manual re-run. A
+// re-run over unchanged input returns the stored record without a
+// model call (fingerprint skip in consolidateFromLog).
 app.post('/api/taste/consolidate', async (c: Ctx) => {
   const body = await c.req.json().catch(() => ({}));
   const { profileId, lang } = body as { profileId?: string; lang?: string };

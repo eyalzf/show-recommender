@@ -71,6 +71,14 @@ export interface ProfileContext {
   excludedIds: Set<number>;
   overrides: Map<number, OverrideRow>;
   tasteSummary: string | null;
+  /**
+   * Fingerprint of the consolidation input the stored record was
+   * derived from (see llm.consolidationInputFingerprint), or null
+   * when never consolidated / pre-migration. A fingerprint that
+   * differs from the current log means the record is stale and the
+   * next refresh (or Preferences read) consolidates first.
+   */
+  tasteInputHash: string | null;
   /** Stored summary parsed into Shared/Casual/Deep sections (see util.ts storage note). Legacy plain text reads as Shared-only. */
   tasteSections: TasteSections;
   /** Derived preference rules stored with the summary (validated; empty for legacy rows). */
@@ -210,9 +218,11 @@ export async function loadProfileContext(
   }
 
   const summary = await db
-    .prepare('SELECT summary_text FROM taste_summaries WHERE profile_id = ? AND ui_language = ?')
+    .prepare(
+      'SELECT summary_text, input_hash FROM taste_summaries WHERE profile_id = ? AND ui_language = ?',
+    )
     .bind(profileId, uiLang)
-    .first<{ summary_text: string }>();
+    .first<{ summary_text: string; input_hash: string | null }>();
 
   const recRes = await db
     .prepare(
@@ -261,6 +271,7 @@ export async function loadProfileContext(
     excludedIds,
     overrides,
     tasteSummary: summaryText,
+    tasteInputHash: summary?.input_hash ?? null,
     tasteSections: tasteRecord.sections,
     rules: tasteRecord.rules,
     externalRecs,
@@ -382,6 +393,29 @@ export async function saveTasteRecord(
   record: TasteRecord,
 ): Promise<void> {
   await saveTasteSummary(db, profileId, uiLang, serializeTasteRecord(record));
+}
+
+/**
+ * Record that a consolidation consumed a given log input, WITHOUT
+ * touching the summary, the history, or the lists. Called after a
+ * successful model run even when the record was unchanged (the
+ * no-op path): the input was consumed, so the next trigger must
+ * skip the call rather than re-run it. Plain UPDATE — a no-op when
+ * no summary row exists yet (the first consolidation saves the
+ * record first, so the row exists in every realistic path).
+ * Manual section edits deliberately do NOT call this: the log is
+ * unchanged, so the edit is preserved until new log input arrives.
+ */
+export async function updateTasteInputHash(
+  db: D1Database,
+  profileId: string,
+  uiLang: string,
+  inputHash: string,
+): Promise<void> {
+  await db
+    .prepare('UPDATE taste_summaries SET input_hash = ? WHERE profile_id = ? AND ui_language = ?')
+    .bind(inputHash, profileId, uiLang)
+    .run();
 }
 
 /**

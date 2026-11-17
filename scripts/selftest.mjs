@@ -971,6 +971,36 @@ assert.deepEqual(consolParsed.contradictions, []);
 assert.equal(consolParsed.languageConflict, null);
 assert.deepEqual(consolParsed.rules, []); // 'No horror' is unmappable: no rule
 
+// --- consolidation temperature + input fingerprint (deferred consolidation) ---
+assert.equal(consolReq.temperature, 0); // greedy: re-runs reproduce the record
+
+const fbRows = [
+  { id: '1', kind: 'show', tmdbId: 1, showTitle: 'Fauda', rating: 'liked', text: '', originalLanguage: 'he', createdAt: 1 },
+  { id: '2', kind: 'show', tmdbId: 2, showTitle: 'The Office', rating: 'disliked', text: 'too cringe', originalLanguage: 'en', createdAt: 2 },
+  { id: '3', kind: 'note', tmdbId: null, showTitle: null, rating: 'note', text: 'Something light', originalLanguage: null, createdAt: 3 },
+  { id: '4', kind: 'note', tmdbId: null, showTitle: null, rating: 'note', text: '   ', originalLanguage: null, createdAt: 4 },
+  { id: '5', kind: 'show', tmdbId: 3, showTitle: null, rating: 'liked', text: '', originalLanguage: null, createdAt: 5 },
+];
+assert.deepEqual(llm.buildConsolidationNotes(fbRows), [
+  { kind: 'liked', source: 'rating', text: 'Fauda', createdAt: 1 },
+  { kind: 'disliked', source: 'rating', text: 'The Office: too cringe', createdAt: 2 },
+  { kind: 'note', source: 'note', text: 'Something light', createdAt: 3 },
+]); // text-less note + title-less/text-less rating skipped; reason glued to title
+
+const fpNotes = llm.buildConsolidationNotes(fbRows);
+const fp1 = llm.consolidationInputFingerprint(fpNotes, 'workers-ai:llama-3.3-70b');
+assert.equal(llm.consolidationInputFingerprint(fpNotes, 'workers-ai:llama-3.3-70b'), fp1); // deterministic
+assert.notEqual(
+  llm.consolidationInputFingerprint([...fpNotes, { kind: 'note', source: 'note', text: 'More drama', createdAt: 6 }], 'workers-ai:llama-3.3-70b'),
+  fp1,
+); // a new note changes the input
+assert.notEqual(llm.consolidationInputFingerprint(fpNotes, 'mock'), fp1); // model identity is part of the input
+assert.equal(
+  llm.consolidationInputFingerprint(fpNotes.map((n) => ({ ...n, createdAt: n.createdAt + 1000 })), 'workers-ai:llama-3.3-70b'),
+  fp1,
+); // timestamps are not input
+assert.equal(llm.CONSOLIDATION_INPUT_VERSION, 1);
+
 // --- mock Hebrew cue routing (dev-only simulation fidelity) ---
 // Eyal's exact dev-profile sentences route to the right sections when
 // each is its own note (the mock routes per statement line, as the
