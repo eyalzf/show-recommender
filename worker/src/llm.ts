@@ -48,6 +48,15 @@ export interface LlmRequest {
   user: string;
   /** Cap on generated tokens; provider default when omitted. */
   maxTokens?: number;
+  /**
+   * Sampling temperature; provider default when omitted. Ranking and
+   * removal-check prompts set 0 (greedy decoding) so re-ranking the
+   * same candidates with the same taste yields the same order —
+   * list stability depends on it. Consolidation leaves it unset
+   * (wording quality benefits from sampling; the no-op guard absorbs
+   * the variance by skipping unchanged saves).
+   */
+  temperature?: number;
 }
 
 export interface LlmProvider {
@@ -105,6 +114,10 @@ export class WorkersAiLlamaProvider implements LlmProvider {
         { role: 'user', content: req.user },
       ],
       max_tokens: req.maxTokens ?? 512,
+      // Sent only when the prompt sets it: ranking/removal prompts
+      // pin temperature 0 (greedy); everything else keeps the
+      // provider default.
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     })) as unknown;
     // Shape 1 (observed 2026-11-15): OpenAI-style chat completion.
     if (out && typeof out === 'object' && 'choices' in out) {
@@ -353,6 +366,10 @@ export function buildRankPrompt(
     user:
       `Taste description:\n${tasteText}\n\nList kind: ${kindLine}\n\nCandidates:\n${lines}\n\nReturn the ranking JSON.`,
     maxTokens: 1200,
+    // Greedy decoding: re-ranking the same candidates with the same
+    // taste must yield the same order (reservoir stability depends on
+    // it — the provider default 0.6 reshuffled the Top 10 every run).
+    temperature: 0,
   };
 }
 
@@ -400,6 +417,9 @@ export function buildRemovalCheckPrompt(
     user:
       `Shows the user disliked, dropped, or removed:\n${negLines}\n\nShortlist to check:\n${candLines}\n\nReturn the removal JSON.`,
     maxTokens: 300,
+    // Greedy decoding, same as ranking: the removal set must be
+    // stable across re-ranks of the same shortlist.
+    temperature: 0,
   };
 }
 
