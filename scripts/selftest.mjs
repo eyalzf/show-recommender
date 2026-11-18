@@ -666,6 +666,7 @@ assert.equal(
   'ko',
 );
 assert.equal(util.detectLanguageConflict(['I love Korean dramas'], ['he', 'en', 'ko']), null);
+assert.equal(util.detectLanguageConflict(['I love Korean dramas'], []), null); // Any language: no conflict possible
 assert.equal(util.detectLanguageConflict(['The weather is nice'], ['he']), null);
 assert.equal(
   util.detectLanguageConflict(['אני אוהבת סדרות קוריאניות'], ['he']).languageCode,

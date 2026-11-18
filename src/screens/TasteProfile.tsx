@@ -5,6 +5,7 @@ import { ApiError } from '../types';
 import { t } from '../i18n';
 import { formatRule } from '../formatRule';
 import { ALL_LANGUAGES } from '../profileMeta';
+import { LanguageChips } from '../components/LanguageChips';
 import { useNotify } from '../components/Notifications';
 
 interface Props {
@@ -105,8 +106,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   const saveSection = (key: TasteSectionKey, text: string) =>
     saveSections({ ...sections, [key]: text });
 
-  const toggleLanguage = async (code: string) => {
-    const next = languages.includes(code) ? languages.filter((c) => c !== code) : [...languages, code];
+  const applyLanguages = async (next: string[]) => {
     setLanguages(next);
     try {
       const res = await api.updateProfile(profile.id, { languages: next });
@@ -356,19 +356,8 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       </div>
 
       <h3>{t(lang, 'languagesLabel')}</h3>
-      <div className="chips">
-        {ALL_LANGUAGES.map((l) => (
-          <button
-            key={l.code}
-            type="button"
-            className={languages.includes(l.code) ? 'chip chip-on' : 'chip chip-btn'}
-            onClick={() => void toggleLanguage(l.code)}
-            aria-pressed={languages.includes(l.code)}
-          >
-            {lang === 'he' ? l.labelHe : l.labelEn}
-          </button>
-        ))}
-      </div>
+      <p className="muted">{t(lang, 'languagesHint')}</p>
+      <LanguageChips lang={lang} selected={languages} onChange={(next) => void applyLanguages(next)} />
     </section>
   );
 }

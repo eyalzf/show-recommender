@@ -1541,6 +1541,8 @@ export function detectLanguageConflict(
   noteTexts: string[],
   allowedLanguages: string[],
 ): { languageCode: string; languageName: string } | null {
+  // An empty filter means "any language" — nothing can conflict with it.
+  if (allowedLanguages.length === 0) return null;
   for (const text of noteTexts) {
     const lower = text.toLowerCase();
     const hasPositive = POSITIVE_WORDS.some((w) => lower.includes(w.toLowerCase()));

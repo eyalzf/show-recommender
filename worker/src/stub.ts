@@ -105,7 +105,7 @@ export const STUB_TASTE = {
   },
   languageConflict: {
     praisedLanguage: 'Korean',
-    message: 'Taste praises Korean drama, but Korean is not in the language filter.',
+    message: 'Taste praises Korean drama, but Korean is not in Shows languages.',
   },
 };
 

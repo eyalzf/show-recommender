@@ -1082,8 +1082,8 @@ async function consolidateFromLog(
             languageName: heuristic.languageName,
             message:
               uiLang === 'he'
-                ? `ההערות משבחות ${heuristic.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
-                : `Your notes praise ${heuristic.languageName}, but it is not in this profile's language filter.`,
+                ? `ההערות משבחות ${heuristic.languageName}, אבל השפה לא בשפות התוכניות של הפרופיל.`
+                : `Your notes praise ${heuristic.languageName}, but it is not in this profile's Shows languages.`,
           }
         : null);
     if (parsed.summary) {
@@ -1231,8 +1231,8 @@ app.get('/api/taste', async (c: Ctx) => {
           languageCode: conflict.languageCode,
           message:
             lang === 'he'
-              ? `ההערות משבחות ${conflict.languageName}, אבל השפה לא במסנן השפות של הפרופיל.`
-              : `Your notes praise ${conflict.languageName}, but it is not in this profile's language filter.`,
+              ? `ההערות משבחות ${conflict.languageName}, אבל השפה לא בשפות התוכניות של הפרופיל.`
+              : `Your notes praise ${conflict.languageName}, but it is not in this profile's Shows languages.`,
         }
       : null,
     profile: profileView(ctx.profile, bootstrapStatusFromFeedback(ctx.feedback)),

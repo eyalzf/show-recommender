@@ -3,7 +3,8 @@ import { api } from '../api';
 import type { Profile, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
-import { ALL_LANGUAGES, ICON_PRESETS } from '../profileMeta';
+import { ICON_PRESETS } from '../profileMeta';
+import { LanguageChips } from '../components/LanguageChips';
 import { ShowPicker } from '../components/ShowPicker';
 import { useNotify } from '../components/Notifications';
 
@@ -45,10 +46,6 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
     // Fire once per mount, in the language active at entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const toggleLanguage = (code: string) => {
-    setLanguages((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
-  };
 
   const submitDetails = async () => {
     if (!name.trim()) return;
@@ -116,19 +113,8 @@ export function Onboarding({ lang, onLangChange, profile, onDone, onExit }: Prop
             </label>
 
             <h3>{t(lang, 'languagesLabel')}</h3>
-            <div className="chips">
-              {ALL_LANGUAGES.map((l) => (
-                <button
-                  key={l.code}
-                  type="button"
-                  className={languages.includes(l.code) ? 'chip chip-on' : 'chip chip-btn'}
-                  onClick={() => toggleLanguage(l.code)}
-                  aria-pressed={languages.includes(l.code)}
-                >
-                  {lang === 'he' ? l.labelHe : l.labelEn}
-                </button>
-              ))}
-            </div>
+            <p className="muted">{t(lang, 'languagesHint')}</p>
+            <LanguageChips lang={lang} selected={languages} onChange={setLanguages} />
 
             <h3>{t(lang, 'iconChoice')}</h3>
             <div className="chips">
