@@ -1445,7 +1445,13 @@ function serveAsset(c: Ctx, path: string): Response {
   return new Response(body, {
     headers: {
       'content-type': CONTENT_TYPES[ext] ?? 'application/octet-stream',
-      'cache-control': key === '/index.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+      // Only /assets/* filenames are content-hashed by Vite, so only they
+      // may be immutable. Stable-named files (favicon, manifest, icons)
+      // change under the same URL and must revalidate — an immutable
+      // favicon once stuck a stale icon in the browser for a year.
+      'cache-control': key.startsWith('/assets/')
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache',
     },
   });
 }
