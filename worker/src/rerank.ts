@@ -477,13 +477,30 @@ export function templateRationale(
 }
 
 /**
+ * Structured-echo detector (2026-11-18 rationale fix): the ranking
+ * model sometimes echoes the candidate line from the prompt instead of
+ * writing a sentence — e.g. `Title (2012) [Comedy] lang=en country=US
+ * anchor="Seinfeld"`. Such text is never a plain-language rationale,
+ * even though it trivially "cites" the anchor. Markers: the prompt's
+ * key=value fragments, or the title-(year)-[genres] line shape. A
+ * natural one-sentence rationale never contains either.
+ */
+export function isStructuredEcho(text: string): boolean {
+  if (/\b(lang|country|anchor)\s*=/i.test(text)) return true;
+  if (/\(\d{4}\)\s*\[/.test(text)) return true;
+  return false;
+}
+
+/**
  * Grounding check for an LLM rationale: keep it when it cites the
  * anchor show (full normalized title, or any anchor word of 4+ chars —
  * Hebrew rationales may translate or shorten a title) or when it cites
- * at least one real genre name AND the year. Otherwise replace with the
- * template. This cannot prove the absence of invented claims (e.g. a
- * fabricated shared actor); the prompt instruction is the control for
- * that, and this check is the backstop for unanchored text.
+ * at least one real genre name AND the year. Structured echoes of the
+ * prompt's candidate lines are always replaced, even though they
+ * contain the anchor name. Otherwise replace with the template. This
+ * cannot prove the absence of invented claims (e.g. a fabricated
+ * shared actor); the prompt instruction is the control for that, and
+ * this check is the backstop for unanchored text.
  */
 export function groundRationale(
   rationale: string,
@@ -495,6 +512,7 @@ export function groundRationale(
   const template = templateRationale(anchorTitle, genreNames, year, uiLang);
   const trimmed = rationale.trim();
   if (!trimmed) return template;
+  if (isStructuredEcho(trimmed)) return template;
   const norm = normalizeTitle(trimmed);
   if (anchorTitle) {
     const anchorNorm = normalizeTitle(anchorTitle);
@@ -505,4 +523,22 @@ export function groundRationale(
   const genreHit = genreNames.some((g) => g && norm.includes(normalizeTitle(g)));
   if (genreHit && year && norm.includes(year)) return trimmed;
   return template;
+}
+
+/**
+ * Grounding check for an LLM risk (2026-11-18 rationale fix): null
+ * stays null; structured echoes and restatements of a stated
+ * preference ("לא אוהב תוכניות ריאליטי") are not fit risks for this
+ * show, so they drop. Anything else is kept verbatim — risks are
+ * free-form by design, and over-filtering would erase genuine ones.
+ * NOTE: no \b after the Hebrew phrases — JS \b is ASCII-only, so a
+ * boundary after a Hebrew word never matches; (\s|$) does the job.
+ */
+export function groundRisk(risk: string | null | undefined): string | null {
+  if (risk == null) return null;
+  const trimmed = risk.trim();
+  if (!trimmed) return null;
+  if (isStructuredEcho(trimmed)) return null;
+  if (/^(לא אוהב|מעדיף לא|don't like|do not like|not a fan of)(\s|$)/i.test(trimmed)) return null;
+  return trimmed;
 }

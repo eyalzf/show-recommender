@@ -1317,6 +1317,8 @@ export interface RankedEntry {
   tmdbId: number;
   rationale: string;
   risk: string | null;
+  /** Retrieval anchor title, when known — lets serve-time grounding keep anchor-citing sentences. Absent on entries parsed from LLM output. */
+  anchorTitle?: string | null;
 }
 
 export interface RankResponse {
@@ -1592,6 +1594,8 @@ export interface ReservoirEntry {
   /** Last rationale (LLM or template), reused when the show promotes. */
   rationale: string;
   risk: string | null;
+  /** Retrieval anchor title, when known — lets serve-time grounding keep anchor-citing sentences. Absent on entries stored before it was added. */
+  anchorTitle?: string | null;
   title: string;
   originalTitle: string;
   originalLanguage: string;
@@ -1652,6 +1656,7 @@ export function parseReservoirEntries(text: string | null | undefined): Reservoi
       score: typeof score === 'number' && Number.isFinite(score) ? score : 0,
       rationale: typeof r['rationale'] === 'string' ? r['rationale'] : '',
       risk: typeof r['risk'] === 'string' ? r['risk'] : null,
+      ...(typeof r['anchorTitle'] === 'string' && r['anchorTitle'] ? { anchorTitle: r['anchorTitle'] } : {}),
       title,
       originalTitle: typeof r['originalTitle'] === 'string' ? r['originalTitle'] : title,
       originalLanguage: typeof r['originalLanguage'] === 'string' ? r['originalLanguage'] : '',

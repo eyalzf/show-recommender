@@ -472,7 +472,8 @@ export function buildRankPrompt(
       'Do NOT invent plot details, cast, creators, shared themes, or qualities not in the list — if the anchor is missing, cite the listed genres and year instead. ' +
       'Write rationales ONLY in ' +
       (uiLang === 'he' ? 'Hebrew' : 'English') +
-      '. Return ONLY a JSON object, no other text: ' +
+      '. Write each rationale as one plain sentence; never echo the candidate lines. ' +
+      'Return ONLY a JSON object, no other text: ' +
       '{"ranked": [{"tmdbId": 123, "rationale": "one sentence naming the anchor show and the listed genres that match the taste text", "risk": "one genuine fit risk grounded in the listed attributes, or null"}], ' +
       '"shortReason": "only when fewer than 10 shows genuinely fit, one sentence why, else null"}. ' +
       'Rank at most 10 shows. Prefer shows that fit the taste text; a show that clashes with a stated dislike must rank last or be omitted.',

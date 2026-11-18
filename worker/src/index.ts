@@ -62,6 +62,7 @@ import {
 import {
   generateLists,
   refillSnapshot,
+  sanitizeStoredItem,
   type GeneratedLists,
   type ListItemOut,
   type MoodOverlay,
@@ -478,7 +479,11 @@ async function listsResponse(
   const parseSnapshot = (json: string): ListItemOut[] => {
     try {
       const parsed: unknown = JSON.parse(json);
-      return Array.isArray(parsed) ? (parsed as ListItemOut[]) : [];
+      // Serve-time repair: stored rationales/risks predate the hardened
+      // checks, so every stored item is re-grounded before serving.
+      return Array.isArray(parsed)
+        ? (parsed as ListItemOut[]).map((item) => sanitizeStoredItem(item, uiLang))
+        : [];
     } catch {
       return [];
     }

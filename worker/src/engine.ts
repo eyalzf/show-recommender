@@ -28,6 +28,7 @@ import {
   fitFromRank,
   freshnessFor,
   groundRationale,
+  groundRisk,
   LONG_TERM_BLEND_WEIGHT,
   maxNegativeSimilarity,
   mergeRankPasses,
@@ -185,6 +186,8 @@ export interface ListItemOut {
   status: string;
   rationale: string;
   risk: string | null;
+  /** Retrieval anchor title, when known. Internal: lets the read path re-ground the rationale; not displayed. */
+  anchorTitle?: string | null;
   posterPath: string | null;
 }
 
@@ -354,6 +357,7 @@ function entryFromCandidate(cand: Candidate, rationale: string, risk: string | n
     score: cand.retrievalScore,
     rationale,
     risk,
+    ...(cand.anchorTitle ? { anchorTitle: cand.anchorTitle } : {}),
     title: cand.title,
     originalTitle: cand.originalTitle,
     originalLanguage: cand.originalLanguage,
@@ -804,6 +808,8 @@ async function rankKind(
                 uiLang,
               )
             : r.rationale || fallbackRationale,
+          risk: groundRisk(r.risk ?? null),
+          ...(cand?.anchorTitle ? { anchorTitle: cand.anchorTitle } : {}),
         };
       });
       const rankedIds = new Set(ranked.map((r) => r.tmdbId));
@@ -825,6 +831,7 @@ async function rankKind(
             uiLang,
           ),
           risk: null,
+          ...(cand.anchorTitle ? { anchorTitle: cand.anchorTitle } : {}),
         });
       }
       return { ranked, shortReason };
@@ -845,6 +852,7 @@ async function rankKind(
           uiLang,
         ),
         risk: null,
+        ...(cand.anchorTitle ? { anchorTitle: cand.anchorTitle } : {}),
       })),
     shortReason: null,
   };
@@ -954,8 +962,15 @@ async function enrichOne(
       language: LANGUAGE_NAMES[show.originalLanguage] ?? show.originalLanguage,
       country: show.originCountry[0] ?? '',
       status: show.status === 'Returning Series' || show.status === 'In Production' ? 'ongoing' : 'ended',
-      rationale: entry.rationale,
-      risk: entry.risk,
+      rationale: groundRationale(
+        entry.rationale,
+        entry.anchorTitle ?? null,
+        show.genres,
+        show.firstAirDate ? show.firstAirDate.slice(0, 4) : '',
+        uiLang,
+      ),
+      risk: groundRisk(entry.risk),
+      ...(entry.anchorTitle ? { anchorTitle: entry.anchorTitle } : {}),
       posterPath: show.posterPath,
     };
   } catch (err) {
@@ -982,6 +997,29 @@ async function enrichToListItems(
     item.rank = i + 1;
   });
   return items;
+}
+
+/**
+ * Serve-time repair for stored snapshot items (2026-11-18 rationale
+ * fix): re-ground rationale/risk through the same checks as generation,
+ * so echoes stored before the fix never display. Read-only — the
+ * stored snapshot is untouched; the cleaned copy is what the client
+ * receives. The item's stored anchorTitle (absent on pre-fix snapshots)
+ * lets anchor-citing sentences survive; without it, genre+year carries
+ * the check, as in groundRationale.
+ */
+export function sanitizeStoredItem(item: ListItemOut, uiLang: string): ListItemOut {
+  return {
+    ...item,
+    rationale: groundRationale(
+      item.rationale,
+      item.anchorTitle ?? null,
+      item.genres ?? [],
+      item.firstYear ? String(item.firstYear) : '',
+      uiLang,
+    ),
+    risk: groundRisk(item.risk),
+  };
 }
 
 /**
@@ -1034,7 +1072,7 @@ export async function refillSnapshot(
     if (!passesHardRules(facts, ctx.rules)) continue;
     const item = await enrichOne(
       c,
-      { tmdbId: entry.tmdbId, rationale: entry.rationale, risk: entry.risk },
+      { tmdbId: entry.tmdbId, rationale: entry.rationale, risk: entry.risk, anchorTitle: entry.anchorTitle ?? null },
       ctx,
       uiLang,
     );

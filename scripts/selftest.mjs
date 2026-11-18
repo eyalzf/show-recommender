@@ -924,6 +924,51 @@ assert.equal(
   rerank.groundRationale('סדרה נהדרת.', 'סיינפלד', ['קומדיה'], '1994', 'he'),
   'דומה לסיינפלד (קומדיה, 1994).',
 );
+// Structured echoes of the prompt's candidate lines are always replaced,
+// even though they contain the anchor name (2026-11-18 rationale fix).
+assert.equal(
+  rerank.groundRationale(
+    'Key & Peele (2012) [Comedy] lang=en country=US anchor="Scrubs"',
+    'Scrubs',
+    ['Comedy'],
+    '2012',
+    'en',
+  ),
+  'Similar to Scrubs (Comedy, 2012).',
+);
+assert.equal(
+  rerank.groundRationale(
+    'Key & Peele (2012) [קומדיה] lang=en country=US anchor=סקראבס',
+    'סקראבס',
+    ['קומדיה'],
+    '2012',
+    'he',
+  ),
+  'דומה לסקראבס (קומדיה, 2012).',
+);
+assert.equal(
+  rerank.groundRationale('Becker (1998) [Comedy]', 'Scrubs', ['Comedy'], '1998', 'en'),
+  'Similar to Scrubs (Comedy, 1998).',
+);
+assert.equal(rerank.isStructuredEcho('A plain sentence about Scrubs.'), false);
+assert.equal(rerank.isStructuredEcho('Similar to Scrubs (Comedy, 2012).'), false);
+
+// groundRisk: null/empty stay null; echoes and preference restatements drop;
+// genuine risks are kept verbatim.
+assert.equal(rerank.groundRisk(null), null);
+assert.equal(rerank.groundRisk('  '), null);
+assert.equal(rerank.groundRisk('לא אוהב תוכניות ריאליטי'), null);
+assert.equal(rerank.groundRisk('מעדיף לא תוכניות יומיות'), null);
+assert.equal(rerank.groundRisk("don't like slow shows"), null);
+assert.equal(
+  rerank.groundRisk('Title (2012) [Comedy] lang=en country=US anchor="Scrubs"'),
+  null,
+);
+assert.equal(
+  rerank.groundRisk('May feel slow in the first episodes.'),
+  'May feel slow in the first episodes.',
+);
+assert.equal(rerank.groundRisk('עלול להיות איטי בהתחלה.'), 'עלול להיות איטי בהתחלה.');
 assert.equal(
   rerank.groundRationale('מזכיר את סיינפלד בקצב.', 'סיינפלד', ['קומדיה'], '1994', 'he'),
   'מזכיר את סיינפלד בקצב.',
