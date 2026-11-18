@@ -15,6 +15,7 @@ interface Props {
   profile: Profile;
   onOpenShow: (tmdbId: number, item?: ListItem) => void;
   onProfileChanged?: (profile: Profile) => void;
+  onRateShow: () => void;
 }
 
 /**
@@ -49,7 +50,7 @@ function useIsMobile(): boolean {
  * (ShowSheet) with the title, rating, rationale, and quick actions;
  * "Full details" in the sheet opens the regular detail view.
  */
-export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
+export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }: Props) {
   const { notify, dismiss } = useNotify();
   const [casual, setCasual] = useState<ListItem[]>([]);
   const [deep, setDeep] = useState<ListItem[]>([]);
@@ -400,7 +401,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
   );
 
   return (
-    <div>
+    <div className="home-view">
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
       <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
 
@@ -549,6 +550,10 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
           onClose={() => setRemoveTarget(null)}
         />
       ) : null}
+
+      <button type="button" className="rate-pill" onClick={onRateShow}>
+        + {t(lang, 'rateShow')}
+      </button>
     </div>
   );
 }

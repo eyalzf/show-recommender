@@ -190,13 +190,6 @@ export function App() {
               {t(lang, n.labelKey)}
             </button>
           ))}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setAddWatchedOpen(true)}
-          >
-            + {t(lang, 'navAddWatched')}
-          </button>
         </nav>
       ) : null}
 
@@ -227,6 +220,7 @@ export function App() {
             profile={activeProfile}
             onOpenShow={openShow}
             onProfileChanged={handleProfileChanged}
+            onRateShow={() => setAddWatchedOpen(true)}
           />
         ) : screen === 'detail' && detailId != null && activeProfile ? (
           <ShowDetail lang={lang} profile={activeProfile} tmdbId={detailId} listItem={detailItem} onBack={() => setScreen('home')} />
@@ -241,6 +235,7 @@ export function App() {
             profile={activeProfile}
             onOpenShow={openShow}
             onProfileChanged={handleProfileChanged}
+            onRateShow={() => setAddWatchedOpen(true)}
           />
         ) : (
           <ProfilePicker
@@ -262,10 +257,10 @@ export function App() {
             className="dialog dialog--anchored"
             role="dialog"
             aria-modal="true"
-            aria-label={t(lang, 'addWatchedTitle')}
+            aria-label={t(lang, 'rateShow')}
             onClick={(e) => e.stopPropagation()}
           >
-            <h2>{t(lang, 'addWatchedTitle')}</h2>
+            <h2>{t(lang, 'rateShow')}</h2>
             <ShowPicker lang={lang} profile={activeProfile} mode="add" onClose={closeAddWatched} />
           </div>
         </div>

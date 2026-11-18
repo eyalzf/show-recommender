@@ -116,6 +116,31 @@ body {
 
 .nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
 
+/* "Rate a show" floating pill, pinned to the bottom of the
+ * Recommendations view. z-index 5 keeps it under the dialog backdrop
+ * (10), the profile dropdown (40), and the sheets/scrims/toasts (60+),
+ * so it never floats above an open overlay. */
+.home-view { padding-bottom: 96px; }
+.rate-pill {
+  position: fixed;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  border: 1px solid var(--red);
+  background: var(--red);
+  color: #fff;
+  border-radius: 999px;
+  padding: 12px 24px;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+.rate-pill:hover { background: var(--red-bright); border-color: var(--red-bright); }
+
 /* -------------------------------------------------------------- type + meta */
 
 .muted { color: var(--muted); font-size: 0.9rem; }
@@ -337,6 +362,22 @@ input[type="file"] { font-size: 0.9rem; }
    (16px start offset + 3 gaps of 8px + 44px peek = 84px). */
 @media (max-width: 640px) {
   .app { padding-inline: 16px; }
+  /* Single-line header: compact title, no tagline/subtitle, controls on
+   * the same row; the profile name truncates before anything wraps. */
+  .header { flex-wrap: nowrap; align-items: center; padding-bottom: 12px; margin-bottom: 12px; }
+  .header-title { min-width: 0; }
+  .header-title h1 { font-size: 1.12rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .header-sub { display: none; }
+  .header-title .muted { display: none; }
+  .header-controls { flex-wrap: nowrap; }
+  .profile-switcher-name { max-width: 72px; }
+  .profile-switcher-btn { padding: 5px 10px 5px 6px; font-size: 0.85rem; }
+  .lang-toggle { gap: 0; border: 1px solid var(--line-strong); border-radius: 999px; overflow: hidden; }
+  .lang-toggle .btn { border: 0; border-radius: 0; padding: 6px 10px; font-size: 0.8rem; }
+  /* Chips row: one scrollable line, never wraps. */
+  .nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 16px; padding-bottom: 2px; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav .btn { flex: 0 0 auto; padding: 8px 16px; }
   .rail-viewport { margin-inline-end: -16px; }
   .rail-track { gap: 8px; padding-inline-end: 16px; }
   .rail-card { flex-basis: min(132px, calc((100vw - 84px) / 3)); }
