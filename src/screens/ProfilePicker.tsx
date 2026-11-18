@@ -27,11 +27,7 @@ export function ProfilePicker({ lang, profiles, stub, onSelect, onCreateNew }: P
               <span className="profile-name">{p.name}</span>
               {incomplete ? (
                 <span className="profile-meta">{t(lang, 'setupIncomplete')}</span>
-              ) : (
-                <span className="profile-meta">
-                  {p.noteCount ?? 0} · {p.listsUpdatedAt ?? t(lang, 'neverUpdated')}
-                </span>
-              )}
+              ) : null}
             </button>
           );
         })}
