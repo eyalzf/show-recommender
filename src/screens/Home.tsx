@@ -6,6 +6,7 @@ import { t } from '../i18n';
 import { formatRule } from '../formatRule';
 import { RailCard } from '../components/ShowCard';
 import { Rail } from '../components/Rail';
+import { ShowSheet } from '../components/ShowSheet';
 import { RatingDialog, RemoveDialog } from '../components/Dialogs';
 import { useNotify } from '../components/Notifications';
 
@@ -17,6 +18,24 @@ interface Props {
 }
 
 /**
+ * Mobile viewport (max-width: 640px), matching the CSS breakpoint where
+ * rail cards go poster-only. The card tap opens the bottom sheet on
+ * mobile and the detail view above it.
+ */
+function useIsMobile(): boolean {
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window === 'undefined' ? false : window.matchMedia('(max-width: 640px)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 640px)');
+    const onChange = () => setIsMobile(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return isMobile;
+}
+
+/**
  * Mock 3 — Home. Two Top 10 lists, nothing more. Both quick actions remove
  * the show from the list (spec §7); rating removes it from BOTH lists.
  *
@@ -25,6 +44,10 @@ interface Props {
  * manage sheet holds the full list, delete, and creation; the "+"
  * chip is the quick-add. The selection persists on the profile
  * server-side until the user picks the main list or deletes the mood.
+ *
+ * Mobile: rail cards are poster-only and the tap opens a bottom sheet
+ * (ShowSheet) with the title, rating, rationale, and quick actions;
+ * "Full details" in the sheet opens the regular detail view.
  */
 export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
   const { notify, dismiss } = useNotify();
@@ -40,6 +63,14 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
   const [deepReason, setDeepReason] = useState<string | null>(null);
   const [rateTarget, setRateTarget] = useState<ListItem | null>(null);
   const [removeTarget, setRemoveTarget] = useState<ListItem | null>(null);
+  const [sheetItem, setSheetItem] = useState<ListItem | null>(null);
+  const isMobile = useIsMobile();
+
+  // A sheet left open across a resize to desktop unmounts with the
+  // breakpoint; clear the stale selection with it.
+  useEffect(() => {
+    if (!isMobile) setSheetItem(null);
+  }, [isMobile]);
   const [moods, setMoods] = useState<Mood[]>([]);
   const [genreLabels, setGenreLabels] = useState<Record<string, string>>({});
   const [activeMoodId, setActiveMoodId] = useState<string | null>(profile.activeMoodId ?? null);
@@ -279,7 +310,10 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
                 lang={lang}
                 onRemove={setRemoveTarget}
                 onRate={setRateTarget}
-                onOpen={(i) => onOpenShow(i.tmdbId, i)}
+                onOpen={(i) => {
+                  if (isMobile) setSheetItem(i);
+                  else onOpenShow(i.tmdbId, i);
+                }}
               />
             ))}
           </Rail>
@@ -431,6 +465,26 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
             </button>
           </div>
         </>
+      ) : null}
+
+      {isMobile && sheetItem ? (
+        <ShowSheet
+          item={sheetItem}
+          lang={lang}
+          onClose={() => setSheetItem(null)}
+          onRemove={(i) => {
+            setSheetItem(null);
+            setRemoveTarget(i);
+          }}
+          onRate={(i) => {
+            setSheetItem(null);
+            setRateTarget(i);
+          }}
+          onFullDetails={(i) => {
+            setSheetItem(null);
+            onOpenShow(i.tmdbId, i);
+          }}
+        />
       ) : null}
 
       {rateTarget ? (

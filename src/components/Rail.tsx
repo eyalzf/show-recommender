@@ -12,6 +12,8 @@ interface Props {
  * deliberately no scroll indicators: the below-card arrow controls
  * were removed (2026-11-15) because they were not noticeable, and
  * edge fades were rejected earlier because they overlapped the cards.
+ * On mobile the cards size to three full plus a clipped fourth — the
+ * clip itself is the scroll cue.
  */
 export function Rail({ label, children }: Props) {
   return (

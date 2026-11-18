@@ -20,6 +20,11 @@ const TMDB_RAIL_IMAGE_BASE = 'https://image.tmdb.org/t/p/w342';
  * the settled Remove/Rate quick actions in compact form. Rationale,
  * risk, and classification chips live in the show detail view, not on
  * the card. Poster and title both open detail.
+ *
+ * On mobile (max-width: 640px) the card is poster-only: the body is
+ * hidden by CSS and the tap opens the bottom sheet instead of detail.
+ * The poster fallback therefore shows the full show title, not just
+ * its first letter — on a poster-only card it is the only title.
  */
 export function RailCard({ item, lang, onRemove, onRate, onOpen }: Props) {
   const showSubtitle = item.originalTitle && item.originalTitle !== item.title;
@@ -42,7 +47,7 @@ export function RailCard({ item, lang, onRemove, onRate, onOpen }: Props) {
             />
           ) : (
             <div className="rail-card-poster-fallback" aria-hidden="true">
-              {item.title.charAt(0)}
+              <span>{item.title}</span>
             </div>
           )}
         </button>
