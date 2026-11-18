@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import { api } from './api';
 import type { ListItem, Profile, ScreenName, UiLang } from './types';
 import { detectLang, t } from './i18n';
@@ -12,6 +13,30 @@ import { ShowPicker } from './components/ShowPicker';
 import { ProfileSwitcher } from './components/ProfileSwitcher';
 import { DevBar } from './components/DevBar';
 import { NotificationProvider } from './components/Notifications';
+
+/** Tab icons, shown in the mobile bottom bar (hidden on desktop). */
+const NAV_ICONS: Record<ScreenName, ReactNode> = {
+  home: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z" />
+    </svg>
+  ),
+  taste: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
+      <circle cx="16" cy="7" r="2.2" />
+      <circle cx="10" cy="17" r="2.2" />
+    </svg>
+  ),
+  recommendations: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M21 12a8 8 0 0 1-8 8H4l2-3.2A8 8 0 1 1 21 12z" />
+    </svg>
+  ),
+  picker: null,
+  onboarding: null,
+  detail: null,
+};
 
 const NAV: { screen: ScreenName; labelKey: 'navHome' | 'navTaste' | 'navRecs' }[] = [
   { screen: 'home', labelKey: 'navHome' },
@@ -187,7 +212,8 @@ export function App() {
               className={screen === n.screen || (n.screen === 'home' && screen === 'detail') ? 'btn btn-primary' : 'btn'}
               onClick={() => setScreen(n.screen)}
             >
-              {t(lang, n.labelKey)}
+              {NAV_ICONS[n.screen]}
+              <span>{t(lang, n.labelKey)}</span>
             </button>
           ))}
         </nav>

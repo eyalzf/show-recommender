@@ -401,7 +401,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
   );
 
   return (
-    <div className="home-view">
+    <div>
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
       <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
 
@@ -471,6 +471,9 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
           {t(lang, 'refresh')}
         </button>
       </p>
+      <button type="button" className="rate-btn" onClick={onRateShow}>
+        + {t(lang, 'rateShow')}
+      </button>
 
       {sheetOpen ? (
         <>
@@ -550,10 +553,6 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
           onClose={() => setRemoveTarget(null)}
         />
       ) : null}
-
-      <button type="button" className="rate-pill" onClick={onRateShow}>
-        + {t(lang, 'rateShow')}
-      </button>
     </div>
   );
 }

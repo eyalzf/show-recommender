@@ -116,30 +116,25 @@ body {
 
 .nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
 
-/* "Rate a show" floating pill, pinned to the bottom of the
- * Recommendations view. z-index 5 keeps it under the dialog backdrop
- * (10), the profile dropdown (40), and the sheets/scrims/toasts (60+),
- * so it never floats above an open overlay. */
-.home-view { padding-bottom: 96px; }
-.rate-pill {
-  position: fixed;
-  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 5;
+/* Tab icons are mobile-only (shown in the bottom bar). */
+.nav .btn svg { display: none; }
+
+/* "Rate a show" button at the bottom of the Recommendations content. */
+.rate-btn {
+  display: block;
+  margin: 28px auto 0;
   border: 1px solid var(--red);
   background: var(--red);
   color: #fff;
   border-radius: 999px;
-  padding: 12px 24px;
+  padding: 12px 26px;
   font: inherit;
   font-size: 0.95rem;
   font-weight: 700;
   white-space: nowrap;
   cursor: pointer;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
-.rate-pill:hover { background: var(--red-bright); border-color: var(--red-bright); }
+.rate-btn:hover { background: var(--red-bright); border-color: var(--red-bright); }
 
 /* -------------------------------------------------------------- type + meta */
 
@@ -374,10 +369,42 @@ input[type="file"] { font-size: 0.9rem; }
   .profile-switcher-btn { padding: 5px 10px 5px 6px; font-size: 0.85rem; }
   .lang-toggle { gap: 0; border: 1px solid var(--line-strong); border-radius: 999px; overflow: hidden; }
   .lang-toggle .btn { border: 0; border-radius: 0; padding: 6px 10px; font-size: 0.8rem; }
-  /* Chips row: one scrollable line, never wraps. */
-  .nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 16px; padding-bottom: 2px; }
-  .nav::-webkit-scrollbar { display: none; }
-  .nav .btn { flex: 0 0 auto; padding: 8px 16px; }
+  /* Bottom tab bar: floating pill, icon + label per tab. z-index 5 keeps
+   * it under the dialog backdrop (10), the profile dropdown (40), and
+   * the sheets/scrims/toasts (60+). Bottom padding on .app keeps the
+   * last content (and the footer) clear of the bar. */
+  .app { padding-bottom: 96px; }
+  .nav {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    z-index: 5;
+    margin-bottom: 0;
+    flex-wrap: nowrap;
+    padding: 6px 4px;
+    background: rgba(21, 24, 30, 0.88);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--line-strong);
+    border-radius: 22px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  }
+  .nav .btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 6px 4px;
+  }
+  .nav .btn svg { display: block; width: 23px; height: 23px; }
+  .nav .btn-primary { background: transparent; border-color: transparent; color: var(--red-bright); }
   .rail-viewport { margin-inline-end: -16px; }
   .rail-track { gap: 8px; padding-inline-end: 16px; }
   .rail-card { flex-basis: min(132px, calc((100vw - 84px) / 3)); }
