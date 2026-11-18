@@ -1717,3 +1717,24 @@ export function tasteRecordsEqual(a: TasteRecord, b: TasteRecord): boolean {
   const bKeys = b.rules.map(ruleSortKey).sort();
   return aKeys.every((k, i) => k === bKeys[i]);
 }
+
+// ---------------------------------------------------------------- moods
+/** A mood selection lives for 3 hours, then silently lapses to the main list. */
+export const MOOD_DURATION_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * The effective mood selection for a profile row: the stored mood only
+ * while its expiry is in the future. A stored mood with no expiry
+ * (selections made before migration 0007) counts as expired — the
+ * default state is no mood selected.
+ */
+export function effectiveActiveMood(
+  activeMoodId: string | null,
+  activeMoodExpiresAt: number | null,
+  now: number = Date.now(),
+): { activeMoodId: string | null; activeMoodExpiresAt: number | null } {
+  if (activeMoodId == null || activeMoodExpiresAt == null || activeMoodExpiresAt <= now) {
+    return { activeMoodId: null, activeMoodExpiresAt: null };
+  }
+  return { activeMoodId, activeMoodExpiresAt };
+}

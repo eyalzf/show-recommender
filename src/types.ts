@@ -42,6 +42,8 @@ export interface Profile {
   uiLanguage: string;
   /** Persisted mood selection: null = the main list. Absent on locally built profiles — treated as null. */
   activeMoodId?: string | null;
+  /** Epoch ms when the mood selection lapses (3h after selection). Absent/null = no live selection. */
+  activeMoodExpiresAt?: number | null;
   noteCount?: number;
   listsUpdatedAt?: string | null;
   /** Absent in stub/demo mode — treated as complete (no gate). */

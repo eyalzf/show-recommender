@@ -74,6 +74,10 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
   const [moods, setMoods] = useState<Mood[]>([]);
   const [genreLabels, setGenreLabels] = useState<Record<string, string>>({});
   const [activeMoodId, setActiveMoodId] = useState<string | null>(profile.activeMoodId ?? null);
+  const [activeMoodExpiresAt, setActiveMoodExpiresAt] = useState<number | null>(
+    profile.activeMoodExpiresAt ?? null,
+  );
+  const [moodExpanded, setMoodExpanded] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [newMoodText, setNewMoodText] = useState('');
@@ -124,6 +128,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
   useEffect(() => {
     const active = profile.activeMoodId ?? null;
     setActiveMoodId(active);
+    setActiveMoodExpiresAt(profile.activeMoodExpiresAt ?? null);
     api
       .moods(profile.id, lang)
       .then((res) => {
@@ -141,7 +146,50 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
   // (e.g. after the active-mood call returns the updated profile).
   useEffect(() => {
     setActiveMoodId(profile.activeMoodId ?? null);
-  }, [profile.activeMoodId]);
+    setActiveMoodExpiresAt(profile.activeMoodExpiresAt ?? null);
+  }, [profile.activeMoodId, profile.activeMoodExpiresAt]);
+
+  // A mood selection lapses 3 hours after selection. The server
+  // enforces that on every read; the timer below keeps a long-lived
+  // session honest, falling back to the main list silently when the
+  // clock runs out (and clearing the stored selection best-effort).
+  const clearExpiredMood = useCallback(() => {
+    setActiveMoodId(null);
+    setActiveMoodExpiresAt(null);
+    onProfileChanged?.({ ...profile, activeMoodId: null, activeMoodExpiresAt: null });
+    load(false, '');
+    void api.setActiveMood(profile.id, null).catch(() => undefined);
+  }, [load, onProfileChanged, profile]);
+
+  useEffect(() => {
+    if (activeMoodId === null || activeMoodExpiresAt === null) return;
+    const remaining = activeMoodExpiresAt - Date.now();
+    if (remaining <= 0) {
+      clearExpiredMood();
+      return;
+    }
+    const timer = setTimeout(clearExpiredMood, remaining);
+    return () => clearTimeout(timer);
+  }, [activeMoodId, activeMoodExpiresAt, clearExpiredMood]);
+
+  // Timers don't fire reliably across sleep/suspension; re-check
+  // whenever the view regains focus.
+  useEffect(() => {
+    const recheck = () => {
+      if (activeMoodId !== null && activeMoodExpiresAt !== null && activeMoodExpiresAt <= Date.now()) {
+        clearExpiredMood();
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') recheck();
+    };
+    window.addEventListener('focus', recheck);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', recheck);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [activeMoodId, activeMoodExpiresAt, clearExpiredMood]);
 
   const activeMood = activeMoodId ? (moods.find((m) => m.id === activeMoodId) ?? null) : null;
 
@@ -151,16 +199,20 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
       : t(lang, 'moodNoRules');
 
   const switchMood = async (moodId: string | null) => {
-    if (moodId === activeMoodId) {
-      setSheetOpen(false);
-      return;
-    }
+    // Tapping the active mood deselects it (toggle) — there is no
+    // explicit "main list" option anymore. Selecting stamps a fresh
+    // 3-hour expiry on the server; the local expiry stays unknown
+    // until the response arrives, so a stale timer can't clear the
+    // new selection early.
+    const target = moodId === activeMoodId ? null : moodId;
     const prev = activeMoodId;
-    setActiveMoodId(moodId);
+    const prevExpiresAt = activeMoodExpiresAt;
+    setActiveMoodId(target);
+    setActiveMoodExpiresAt(null);
     setSheetOpen(false);
-    load(false, moodId ?? '');
+    load(false, target ?? '');
     try {
-      const res = await api.setActiveMood(profile.id, moodId);
+      const res = await api.setActiveMood(profile.id, target);
       onProfileChanged?.(res.profile);
       // Deliberately no moods refetch here: the server bumps
       // last_used_at, but the chip order stays as loaded until the
@@ -168,6 +220,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
       // the mount effect fetches the new recency order.
     } catch (err) {
       setActiveMoodId(prev);
+      setActiveMoodExpiresAt(prevExpiresAt);
       load(false, prev ?? '');
       notify(
         err instanceof ApiError && err.code === 'database_not_configured'
@@ -210,7 +263,8 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
         // The server already cleared the active selection; mirror it
         // locally and fall back to the main list.
         setActiveMoodId(null);
-        onProfileChanged?.({ ...profile, activeMoodId: null });
+        setActiveMoodExpiresAt(null);
+        onProfileChanged?.({ ...profile, activeMoodId: null, activeMoodExpiresAt: null });
         load(false, '');
       }
     } catch (err) {
@@ -350,61 +404,63 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
       {stub ? <p className="demo-badge">{t(lang, 'demoData')}</p> : null}
       <div className="eyebrow">{t(lang, 'listsEyebrow')}</div>
 
-      <div className="mood-card">
+      <div className={moodExpanded ? 'mood-card' : 'mood-card collapsed'}>
         <div className="mood-row-head">
-          <span className="mood-label">
-            <span aria-hidden="true">🎭 </span>
-            {t(lang, 'moodLabel')}
-          </span>
-          <button type="button" className="btn btn-ghost" onClick={() => setSheetOpen(true)}>
-            {t(lang, 'moodManage')}
-          </button>
-        </div>
-        <div className="mood-chips" role="group" aria-label={t(lang, 'moodLabel')}>
           <button
             type="button"
-            className={activeMoodId === null ? 'mood-chip active' : 'mood-chip'}
-            aria-pressed={activeMoodId === null}
-            onClick={() => void switchMood(null)}
+            className="mood-head-toggle"
+            onClick={() => {
+              setMoodExpanded((v) => !v);
+              setAddOpen(false);
+            }}
+            aria-expanded={moodExpanded}
           >
-            {t(lang, 'moodMain')}
+            <span className="mood-label">
+              <span aria-hidden="true" className={activeMood ? 'mood-label-icon' : 'mood-label-icon dim'}>
+                🎭{' '}
+              </span>
+              {t(lang, 'moodLabel')}
+            </span>
+            <span className="mood-head-right">
+              {!moodExpanded && activeMood ? (
+                <span className="mood-head-mood">{activeMood.text}</span>
+              ) : null}
+              <span className="chev" aria-hidden="true">
+                {moodExpanded ? '▴' : '▾'}
+              </span>
+            </span>
           </button>
-          {moods.map((mood) => (
+          {moodExpanded ? (
+            <button type="button" className="btn btn-ghost" onClick={() => setSheetOpen(true)}>
+              {t(lang, 'moodManage')}
+            </button>
+          ) : null}
+        </div>
+        {moodExpanded ? (
+          <div className="mood-chips" role="group" aria-label={t(lang, 'moodLabel')}>
+            {moods.map((mood) => (
+              <button
+                type="button"
+                key={mood.id}
+                className={mood.id === activeMoodId ? 'mood-chip active' : 'mood-chip'}
+                aria-pressed={mood.id === activeMoodId}
+                onClick={() => void switchMood(mood.id)}
+              >
+                {mood.text}
+              </button>
+            ))}
             <button
               type="button"
-              key={mood.id}
-              className={mood.id === activeMoodId ? 'mood-chip active' : 'mood-chip'}
-              aria-pressed={mood.id === activeMoodId}
-              onClick={() => void switchMood(mood.id)}
+              className="mood-chip mood-chip-add"
+              onClick={() => setAddOpen((v) => !v)}
+              aria-expanded={addOpen}
             >
-              {mood.text}
+              {t(lang, 'moodNew')}
             </button>
-          ))}
-          <button
-            type="button"
-            className="mood-chip mood-chip-add"
-            onClick={() => setAddOpen((v) => !v)}
-            aria-expanded={addOpen}
-          >
-            {t(lang, 'moodNew')}
-          </button>
-        </div>
-        {addOpen ? renderAddRow() : null}
-      </div>
-
-      {activeMood ? (
-        <div className="mood-banner">
-          <div>
-            <b>
-              {t(lang, 'moodActivePrefix')}: {activeMood.text}
-            </b>
-            <div className="mood-banner-rules">{rulesSummary(activeMood)}</div>
           </div>
-          <button type="button" className="btn btn-ghost" onClick={() => void switchMood(null)}>
-            {t(lang, 'moodBackToMain')}
-          </button>
-        </div>
-      ) : null}
+        ) : null}
+        {moodExpanded && addOpen ? renderAddRow() : null}
+      </div>
 
       {renderList(t(lang, 'casualTitle'), 'Casual Top 10', casual, casualReason)}
       {renderList(t(lang, 'deepTitle'), 'Deep Focus Top 10', deep, deepReason)}
@@ -422,18 +478,6 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged }: Props) {
             <div className="mood-sheet-grab" aria-hidden="true" />
             <h3>{t(lang, 'moodSheetTitle')}</h3>
             <p className="mood-sheet-hint">{t(lang, 'moodSheetHint')}</p>
-            <button
-              type="button"
-              className={activeMoodId === null ? 'mood-srow sel' : 'mood-srow'}
-              onClick={() => void switchMood(null)}
-            >
-              <span className="mood-radio" aria-hidden="true" />
-              <span className="mood-srow-grow">
-                <span className="mood-srow-name">{t(lang, 'moodMain')}</span>
-                <br />
-                <span className="mood-srow-rules">{t(lang, 'moodMainSub')}</span>
-              </span>
-            </button>
             {moods.map((mood) => (
               <div key={mood.id} className={mood.id === activeMoodId ? 'mood-srow sel' : 'mood-srow'}>
                 <button

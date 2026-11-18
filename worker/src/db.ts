@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { normalizeTitle, parseMoodRulesJson, parseTasteRecord, parseTasteSummary, PRESET_MOODS, serializeTasteRecord, serializeTasteSummary, type PreferenceRule, type TasteRecord, type TasteSections } from './util';
+import { effectiveActiveMood, MOOD_DURATION_MS, normalizeTitle, parseMoodRulesJson, parseTasteRecord, parseTasteSummary, PRESET_MOODS, serializeTasteRecord, serializeTasteSummary, type PreferenceRule, type TasteRecord, type TasteSections } from './util';
 
 /**
  * D1 access for profile-scoped state. Every function here takes an
@@ -22,8 +22,10 @@ export interface ProfileRow {
   iconRef: string | null;
   languages: string[];
   uiLanguage: string;
-  /** Persisted mood selection: null = the main list. Stays set until the user picks the main list or deletes the mood. */
+  /** Persisted mood selection: null = the main list. A selection lives 3 hours from selection, then lapses silently; effectiveActiveMood() enforces that on every read. */
   activeMoodId: string | null;
+  /** Epoch ms when the selection lapses; null when no mood is selected (or the selection predates migration 0007, which counts as expired). */
+  activeMoodExpiresAt: number | null;
   createdAt: number;
 }
 
@@ -149,11 +151,15 @@ function parseLanguages(json: string | null): string[] {
 export async function loadProfile(db: D1Database, profileId: string): Promise<ProfileRow | null> {
   const row = await db
     .prepare(
-      'SELECT id, account_id, name, icon_kind, icon_ref, languages_json, ui_language, active_mood_id, created_at FROM profiles WHERE id = ?',
+      'SELECT id, account_id, name, icon_kind, icon_ref, languages_json, ui_language, active_mood_id, active_mood_expires_at, created_at FROM profiles WHERE id = ?',
     )
     .bind(profileId)
     .first<Record<string, unknown>>();
   if (!row) return null;
+  const mood = effectiveActiveMood(
+    row['active_mood_id'] == null ? null : String(row['active_mood_id']),
+    row['active_mood_expires_at'] == null ? null : Number(row['active_mood_expires_at']),
+  );
   return {
     id: String(row['id']),
     accountId: String(row['account_id']),
@@ -162,7 +168,8 @@ export async function loadProfile(db: D1Database, profileId: string): Promise<Pr
     iconRef: row['icon_ref'] == null ? null : String(row['icon_ref']),
     languages: parseLanguages(String(row['languages_json'] ?? '[]')),
     uiLanguage: String(row['ui_language']),
-    activeMoodId: row['active_mood_id'] == null ? null : String(row['active_mood_id']),
+    activeMoodId: mood.activeMoodId,
+    activeMoodExpiresAt: mood.activeMoodExpiresAt,
     createdAt: Number(row['created_at']),
   };
 }
@@ -683,6 +690,7 @@ export async function createProfile(
     languages,
     uiLanguage,
     activeMoodId: null,
+    activeMoodExpiresAt: null,
     createdAt,
   };
 }
@@ -815,17 +823,17 @@ export async function deleteMood(db: D1Database, profileId: string, moodId: stri
     .run();
   await db.prepare('DELETE FROM moods WHERE profile_id = ? AND id = ?').bind(profileId, moodId).run();
   await db
-    .prepare('UPDATE profiles SET active_mood_id = NULL WHERE id = ? AND active_mood_id = ?')
+    .prepare('UPDATE profiles SET active_mood_id = NULL, active_mood_expires_at = NULL WHERE id = ? AND active_mood_id = ?')
     .bind(profileId, moodId)
     .run();
   return true;
 }
 
 /**
- * Persist the active mood (null = main list). The selection survives
- * reloads and profile switches until the user picks the main list or
- * deletes the mood. Activation bumps last_used_at for recency order.
- * Returns false when the mood id does not belong to the profile.
+ * Persist the active mood (null = main list). Selecting a mood stamps a
+ * fresh 3-hour expiry; deselecting clears both columns. Activation bumps
+ * last_used_at for recency order. Returns false when the mood id does
+ * not belong to the profile.
  */
 export async function setActiveMood(
   db: D1Database,
@@ -840,7 +848,11 @@ export async function setActiveMood(
       .bind(Date.now(), profileId, moodId)
       .run();
   }
-  await db.prepare('UPDATE profiles SET active_mood_id = ? WHERE id = ?').bind(moodId, profileId).run();
+  const expiresAt = moodId === null ? null : Date.now() + MOOD_DURATION_MS;
+  await db
+    .prepare('UPDATE profiles SET active_mood_id = ?, active_mood_expires_at = ? WHERE id = ?')
+    .bind(moodId, expiresAt, profileId)
+    .run();
   return true;
 }
 

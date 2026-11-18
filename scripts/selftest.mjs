@@ -673,6 +673,29 @@ assert.equal(
   'ko',
 );
 
+// effectiveActiveMood (3-hour mood selections, migration 0007)
+assert.equal(util.MOOD_DURATION_MS, 3 * 60 * 60 * 1000);
+assert.deepEqual(util.effectiveActiveMood('m1', 2000, 1000), {
+  activeMoodId: 'm1',
+  activeMoodExpiresAt: 2000,
+});
+assert.deepEqual(util.effectiveActiveMood('m1', 1000, 1000), {
+  activeMoodId: null,
+  activeMoodExpiresAt: null,
+}); // expiry boundary counts as lapsed
+assert.deepEqual(util.effectiveActiveMood('m1', 999, 1000), {
+  activeMoodId: null,
+  activeMoodExpiresAt: null,
+});
+assert.deepEqual(util.effectiveActiveMood('m1', null, 1000), {
+  activeMoodId: null,
+  activeMoodExpiresAt: null,
+}); // pre-migration selection: no expiry means lapsed
+assert.deepEqual(util.effectiveActiveMood(null, null, 1000), {
+  activeMoodId: null,
+  activeMoodExpiresAt: null,
+});
+
 // ---------------------------------------------------------------- rerank
 // worker/src/rerank.ts: decay, MMR/calibration/epsilon greedy pass,
 // rank-pass merging, grounded rationales, negative similarity.

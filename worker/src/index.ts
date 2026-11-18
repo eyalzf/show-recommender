@@ -70,6 +70,7 @@ import { loadKnownNames, recomputePeopleScores } from './trust';
 import {
   combineTasteSections,
   detectLanguageConflict,
+  effectiveActiveMood,
   parseConsolidationResponse,
   parseReservoirEntries,
   parseTasteSummary,
@@ -270,6 +271,7 @@ function profileView(
     languages: string[];
     uiLanguage: string;
     activeMoodId?: string | null;
+    activeMoodExpiresAt?: number | null;
   },
   bootstrap?: BootstrapStatus,
 ) {
@@ -281,6 +283,7 @@ function profileView(
     languages: p.languages,
     uiLanguage: p.uiLanguage,
     activeMoodId: p.activeMoodId ?? null,
+    activeMoodExpiresAt: p.activeMoodExpiresAt ?? null,
     bootstrap,
   };
 }
@@ -291,7 +294,7 @@ app.get('/api/profiles', async (c: Ctx) => {
   }
   const auth = getAuth(c);
   const rows = await c.env.DB!.prepare(
-    'SELECT id, name, icon_kind, icon_ref, languages_json, ui_language, active_mood_id FROM profiles WHERE account_id = ? ORDER BY created_at',
+    'SELECT id, name, icon_kind, icon_ref, languages_json, ui_language, active_mood_id, active_mood_expires_at FROM profiles WHERE account_id = ? ORDER BY created_at',
   )
     .bind(auth.accountId)
     .all();
@@ -299,6 +302,20 @@ app.get('/api/profiles', async (c: Ctx) => {
     (rows.results as unknown as Record<string, unknown>[]).map(async (r) => {
       const id = String(r['id']);
       const bootstrap = await loadBootstrapStatus(c.env.DB!, id);
+      const mood = effectiveActiveMood(
+        r['active_mood_id'] == null ? null : String(r['active_mood_id']),
+        r['active_mood_expires_at'] == null ? null : Number(r['active_mood_expires_at']),
+      );
+      if (r['active_mood_id'] != null && mood.activeMoodId === null) {
+        // Lazy clear: the selection lapsed (or predates the expiry
+        // column). Best-effort — reads already treat it as lapsed.
+        await c.env.DB!.prepare(
+          'UPDATE profiles SET active_mood_id = NULL, active_mood_expires_at = NULL WHERE id = ?',
+        )
+          .bind(id)
+          .run()
+          .catch(() => undefined);
+      }
       return profileView(
         {
           id,
@@ -307,7 +324,8 @@ app.get('/api/profiles', async (c: Ctx) => {
           iconRef: r['icon_ref'] == null ? null : String(r['icon_ref']),
           languages: JSON.parse(String(r['languages_json'] ?? '[]')) as string[],
           uiLanguage: String(r['ui_language']),
-          activeMoodId: r['active_mood_id'] == null ? null : String(r['active_mood_id']),
+          activeMoodId: mood.activeMoodId,
+          activeMoodExpiresAt: mood.activeMoodExpiresAt,
         },
         bootstrap,
       );
