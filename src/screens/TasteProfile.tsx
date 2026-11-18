@@ -62,6 +62,15 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
   // frozen when the toast is shown (see the conflict effect below).
   const languagesRef = useRef(languages);
   languagesRef.current = languages;
+  // Once the user changes languages on this screen, a taste response
+  // requested before the change must not overwrite the choice: it
+  // carries stale languages and would visibly revert the chips even
+  // though the save already went through. Reset per profile/language,
+  // so a fresh load still syncs.
+  const languagesTouchedRef = useRef(false);
+  useEffect(() => {
+    languagesTouchedRef.current = false;
+  }, [profile.id, lang]);
   useEffect(() => {
     aliveRef.current = true;
     return () => {
@@ -80,7 +89,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
         setRules(res.rules ?? []);
         setGenreLabels(res.genreLabels ?? {});
         setLanguageConflict(res.languageConflict);
-        if (res.profile) setLanguages(res.profile.languages);
+        if (res.profile && !languagesTouchedRef.current) setLanguages(res.profile.languages);
       })
       .catch(() => {})
       .finally(() => {
@@ -107,6 +116,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
     saveSections({ ...sections, [key]: text });
 
   const applyLanguages = async (next: string[]) => {
+    languagesTouchedRef.current = true;
     setLanguages(next);
     try {
       const res = await api.updateProfile(profile.id, { languages: next });
@@ -131,6 +141,7 @@ export function TasteProfile({ lang, profile, onProfileChanged }: Props) {
       return;
     }
     const next = [...new Set([...languagesRef.current, code])];
+    languagesTouchedRef.current = true;
     setLanguages(next);
     setLanguageConflict(null);
     try {
