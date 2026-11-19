@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { dropShowFromLists } from '../listsCache';
 import type { ListItem, Profile, Rating, ShowDetail, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
@@ -21,7 +22,7 @@ interface Props {
  * Mock 4 — Show detail + feedback. Full metadata, providers listed (never
  * filtered), like/dislike/dropped with an optional reason. NO "Want to
  * watch" anywhere (spec §7). Saving a rating removes the show from both
- * lists (the Home screen reflects that on its next load).
+ * lists and goes straight back to the recommendations view.
  */
 export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
   const { notify } = useNotify();
@@ -51,6 +52,10 @@ export function ShowDetail({ lang, profile, tmdbId, listItem, onBack }: Props) {
     try {
       await api.feedback(profile.id, tmdbId, rating, reason, show.title, show.originalLanguage);
       notify(t(lang, 'save'), { kind: 'success' });
+      // Keep the session cache in step so the show is gone when the
+      // recommendations view remounts, then go straight back to it.
+      dropShowFromLists(profile.id, tmdbId);
+      onBack();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
         notify(t(lang, 'notSaved'), { kind: 'error' });

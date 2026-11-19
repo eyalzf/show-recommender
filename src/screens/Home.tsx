@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, type Mood } from '../api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, type ListsResponse, type Mood } from '../api';
+import { dropShowFromLists, getCachedLists, listsCacheKey, setCachedLists } from '../listsCache';
 import type { ListItem, Profile, Rating, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
@@ -57,6 +58,13 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
   const [stub, setStub] = useState(false);
   const [stale, setStale] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // `loading` is the neutral first-fetch state (plain read, no lists
+  // yet); `generating` is reserved for a real regeneration. `updating`
+  // is the slim indicator while a background revalidation runs long.
+  const [loading, setLoading] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const loadSeqRef = useRef(0);
+  const slowTimerRef = useRef(0);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
@@ -84,46 +92,88 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
   const [newMoodText, setNewMoodText] = useState('');
   const [creating, setCreating] = useState(false);
 
+  /** Apply a lists response to state (shared by cache hits and fetches). */
+  const applyLists = useCallback((res: ListsResponse) => {
+    setCasual(res.casual);
+    setDeep(res.deep);
+    setStub(Boolean(res.stub));
+    setStale(Boolean(res.stale));
+    setUpdatedAt(res.updatedAt);
+    setCasualReason(res.casualShortReason);
+    setDeepReason(res.deepShortReason);
+    setHasLoaded(true);
+  }, []);
+
   const load = useCallback(
     (forceRefresh = false, moodId = '') => {
-      // Generation is one call producing both lists, so both sections
-      // show the building state until it resolves — including the
-      // first-ever generation after onboarding completes.
-      setGenerating(true);
+      const key = listsCacheKey(profile.id, lang, moodId);
+      const seq = ++loadSeqRef.current;
+      const settle = (fn: () => void) => {
+        if (loadSeqRef.current === seq) fn();
+      };
+      window.clearTimeout(slowTimerRef.current);
+      // A plain read is fast (~0.4s measured), so a long wait means the
+      // server is actually generating — only then show that state. A
+      // cached list renders instantly and the fetch revalidates silently.
+      const cached = forceRefresh ? undefined : getCachedLists(key);
+      if (cached) {
+        applyLists(cached);
+        slowTimerRef.current = window.setTimeout(() => {
+          settle(() => setUpdating(true));
+        }, 3000);
+      } else if (forceRefresh) {
+        // A manual refresh is a real regeneration: say so up front.
+        setGenerating(true);
+        setLoading(false);
+        setUpdating(false);
+      } else {
+        setLoading(true);
+        setUpdating(false);
+        slowTimerRef.current = window.setTimeout(() => {
+          settle(() => {
+            setLoading(false);
+            setGenerating(true);
+          });
+        }, 3000);
+      }
       setLoadFailed(false);
       dismiss('lists-error');
       api
         .lists(profile.id, lang, forceRefresh, moodId)
         .then((res) => {
-          setCasual(res.casual);
-          setDeep(res.deep);
-          setStub(Boolean(res.stub));
-          setStale(Boolean(res.stale));
-          setUpdatedAt(res.updatedAt);
-          setCasualReason(res.casualShortReason);
-          setDeepReason(res.deepShortReason);
-          if (res.stale) notify(t(lang, 'listsStale'), { key: 'lists-stale' });
+          settle(() => {
+            setCachedLists(key, res);
+            applyLists(res);
+            if (res.stale) notify(t(lang, 'listsStale'), { key: 'lists-stale' });
+          });
         })
         .catch((err: unknown) => {
-          setLoadFailed(true);
-          notify(
-            err instanceof ApiError && err.code === 'tmdb_not_configured'
-              ? t(lang, 'tmdbMissing')
-              : t(lang, 'engineFailed'),
-            {
-              kind: 'error',
-              sticky: true,
-              key: 'lists-error',
-              action: { label: t(lang, 'retry'), onClick: () => load(true, moodId) },
-            },
-          );
+          settle(() => {
+            setLoadFailed(true);
+            notify(
+              err instanceof ApiError && err.code === 'tmdb_not_configured'
+                ? t(lang, 'tmdbMissing')
+                : t(lang, 'engineFailed'),
+              {
+                kind: 'error',
+                sticky: true,
+                key: 'lists-error',
+                action: { label: t(lang, 'retry'), onClick: () => load(true, moodId) },
+              },
+            );
+          });
         })
         .finally(() => {
-          setGenerating(false);
-          setHasLoaded(true);
+          settle(() => {
+            window.clearTimeout(slowTimerRef.current);
+            setGenerating(false);
+            setLoading(false);
+            setUpdating(false);
+            setHasLoaded(true);
+          });
         });
     },
-    [profile.id, lang, notify, dismiss],
+    [profile.id, lang, notify, dismiss, applyLists],
   );
 
   useEffect(() => {
@@ -281,6 +331,9 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
   const dropFromLists = (tmdbId: number) => {
     setCasual((prev) => prev.filter((i) => i.tmdbId !== tmdbId));
     setDeep((prev) => prev.filter((i) => i.tmdbId !== tmdbId));
+    // Keep the session cache in step, or the show resurfaces when the
+    // view remounts and renders from cache before revalidating.
+    dropShowFromLists(profile.id, tmdbId);
   };
 
   /** Persist best-effort; in demo mode the server says so and we say so. */
@@ -320,23 +373,38 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
     void persist(() => api.deny(profile.id, target.tmdbId));
   };
 
+  const renderSkeletons = () => (
+    <div className="rail-skeletons" aria-hidden="true">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div className="skeleton-card rail-skeleton" key={i}>
+          <div className="skeleton-poster" />
+          <div className="skeleton-body">
+            <div className="skeleton-bar skeleton-bar-title" />
+            <div className="skeleton-bar skeleton-bar-short" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
   const renderBuilding = () => (
     <div role="status" aria-live="polite">
       <p className="building-line">
         <span className="spinner" aria-hidden="true" />
         {t(lang, 'listsGenerating')}
       </p>
-      <div className="rail-skeletons" aria-hidden="true">
-        {[0, 1, 2, 3, 4].map((i) => (
-          <div className="skeleton-card rail-skeleton" key={i}>
-            <div className="skeleton-poster" />
-            <div className="skeleton-body">
-              <div className="skeleton-bar skeleton-bar-title" />
-              <div className="skeleton-bar skeleton-bar-short" />
-            </div>
-          </div>
-        ))}
-      </div>
+      {renderSkeletons()}
+    </div>
+  );
+
+  // Neutral first-fetch state: a plain stored read, not a regeneration.
+  const renderLoading = () => (
+    <div role="status" aria-live="polite">
+      <p className="building-line">
+        <span className="spinner" aria-hidden="true" />
+        {t(lang, 'loading')}
+      </p>
+      {renderSkeletons()}
     </div>
   );
 
@@ -349,6 +417,8 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
       </div>
       {generating ? (
         renderBuilding()
+      ) : loading ? (
+        renderLoading()
       ) : items.length === 0 ? (
         // On a failed load the error toast + retry action explains the
         // empty section; never show the generic short-list fallback.
@@ -467,6 +537,7 @@ export function Home({ lang, profile, onOpenShow, onProfileChanged, onRateShow }
       {renderList(t(lang, 'deepTitle'), 'Deep Focus Top 10', deep, deepReason)}
       <p className="lists-meta">
         {t(lang, 'updated')}: {hasLoaded ? (updatedAt ?? t(lang, 'neverUpdated')) : t(lang, 'loading')}{' '}
+        {updating ? <span>· {t(lang, 'listsUpdating')}</span> : null}
         <button type="button" className="btn btn-ghost" onClick={() => load(true, activeMoodId ?? '')} disabled={generating}>
           {t(lang, 'refresh')}
         </button>

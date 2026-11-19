@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { dropShowFromLists } from '../listsCache';
 import type { Profile, Rating, SearchHit, UiLang } from '../types';
 import { ApiError } from '../types';
 import { t } from '../i18n';
@@ -245,6 +246,8 @@ export function ShowPicker({ lang, profile, mode, onDone, onClose }: ShowPickerP
     setRated((m) => new Map(m).set(target.tmdbId, entry));
     try {
       await api.feedback(profile.id, target.tmdbId, rating, reason, target.title, target.originalLanguage);
+      // Keep the session cache in step in case the rated show was in a list.
+      dropShowFromLists(profile.id, target.tmdbId);
       if (mode === 'add') notify(t(lang, 'watchedSaved'), { kind: 'success' });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'database_not_configured') {
